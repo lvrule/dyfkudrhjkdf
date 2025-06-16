@@ -10,7 +10,7 @@ import sys
 
 # Конфигурация
 SERVER_URL = "http://localhost:8080"  # Тестируем на локальной машине
-API_SECRET = "ваш_секретный_ключ"    # Должен совпадать с серверным
+API_SECRET = "6ff39f9e75475d447411994e94a080c3"    # Должен совпадать с серверным
 UNIQUE_SUFFIX = "PCCTRL"
 
 def generate_device_id():

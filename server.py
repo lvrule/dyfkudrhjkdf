@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from threading import Thread
 import secrets
 import socket
+import requests
 
 # Настройка логирования
 logging.basicConfig(
@@ -234,21 +235,28 @@ def run_api_server():
 
 def main():
     """Основная функция запуска"""
+    # Получаем внешний IP
+    try:
+        external_ip = requests.get('https://api.ipify.org').text
+        print(f"Ваш внешний IP: {external_ip}")
+    except:
+        print("Не удалось определить внешний IP")
+    
     if is_port_in_use(API_PORT):
         print(f"Ошибка: Порт {API_PORT} уже используется!")
-        print("1. Закройте другие программы, использующие этот порт")
-        print(f"2. Или измените API_PORT в коде на другой (сейчас {API_PORT})")
         return
     
-    # Запускаем API сервер в отдельном потоке
+    # Запускаем API сервер
     api_thread = Thread(target=run_api_server, daemon=True)
     api_thread.start()
     
-    # Запускаем Telegram бота
+    # Запускаем бота
     try:
         bot = ServerBot("8060699147:AAEawF_dYzDuEA7lqF_FHCuHsujuMwF4r8k")
-        print(f"Сервер запущен. API секрет: {API_SECRET}")
-        print(f"API доступен по адресу: http://localhost:{API_PORT}")
+        print(f"\nСервер запущен:")
+        print(f"Локальный адрес: http://localhost:{API_PORT}")
+        print(f"Внешний адрес: http://{external_ip}:{API_PORT}")
+        print(f"API секрет: {API_SECRET}\n")
         bot.run()
     except Exception as e:
         print(f"Ошибка при запуске бота: {e}")
