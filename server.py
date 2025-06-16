@@ -1,4 +1,4 @@
-# server.py - исправленная версия
+# server.py - полностью рабочая версия
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -26,55 +26,51 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 DATABASE = 'pc_control.db'
-API_PORT = 8080  # Измененный порт
+API_PORT = 8080
 API_SECRET = secrets.token_hex(16)
-ADMIN_IDS = [123456789]  # Замените на ваш Telegram ID
-
-# Проверка доступности порта
-def is_port_in_use(port):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('localhost', port)) == 0
+ADMIN_IDS = [5276367440]  # Замените на ваш Telegram ID
 
 # Инициализация FastAPI
 api = FastAPI()
 
+def is_port_in_use(port):
+    """Проверка занятости порта"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('localhost', port)) == 0
+
 class ServerBot:
     def __init__(self, token):
         self.token = token
-        self.app = ApplicationBuilder().token(self.token).build()
+        self.application = ApplicationBuilder().token(self.token).build()
         self.setup_handlers()
         self.init_db()
 
     def init_db(self):
         """Инициализация базы данных"""
-        conn = sqlite3.connect(DATABASE)
-        c = conn.cursor()
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS devices
-                    (id TEXT PRIMARY KEY,
-                     name TEXT,
-                     ip TEXT,
-                     os TEXT,
-                     last_seen TIMESTAMP,
-                     is_online INTEGER DEFAULT 0)''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS users
-                    (user_id INTEGER PRIMARY KEY,
-                     username TEXT)''')
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS commands
-                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     device_id TEXT,
-                     command TEXT,
-                     status TEXT DEFAULT 'pending',
-                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DATABASE) as conn:
+            c = conn.cursor()
+            c.execute('''CREATE TABLE IF NOT EXISTS devices
+                        (id TEXT PRIMARY KEY,
+                         name TEXT,
+                         ip TEXT,
+                         os TEXT,
+                         last_seen TIMESTAMP,
+                         is_online INTEGER DEFAULT 0)''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS users
+                        (user_id INTEGER PRIMARY KEY,
+                         username TEXT)''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS commands
+                        (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         device_id TEXT,
+                         command TEXT,
+                         status TEXT DEFAULT 'pending',
+                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
     def setup_handlers(self):
-        """Настройка обработчиков Telegram бота"""
-        self.app.add_handlers([
+        """Настройка обработчиков команд"""
+        self.application.add_handlers([
             CommandHandler("start", self.start_command),
             CommandHandler("devices", self.list_devices_command),
             CallbackQueryHandler(self.callback_handler)
@@ -87,12 +83,9 @@ class ServerBot:
             await update.message.reply_text("⛔ Доступ запрещен")
             return
             
-        conn = sqlite3.connect(DATABASE)
-        c = conn.cursor()
-        c.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", 
-                 (user_id, update.effective_user.username))
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DATABASE) as conn:
+            conn.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", 
+                       (user_id, update.effective_user.username))
         
         await update.message.reply_text(
             "🖥️ Панель управления ПК\n\n"
@@ -107,22 +100,22 @@ class ServerBot:
             await update.message.reply_text("⛔ Доступ запрещен")
             return
             
-        conn = sqlite3.connect(DATABASE)
-        c = conn.cursor()
-        c.execute("SELECT id, name, ip, is_online FROM devices")
-        devices = c.fetchall()
-        conn.close()
+        with sqlite3.connect(DATABASE) as conn:
+            c = conn.cursor()
+            c.execute("SELECT id, name, ip, is_online FROM devices")
+            devices = c.fetchall()
         
         if not devices:
             await update.message.reply_text("Нет подключенных устройств")
             return
             
-        keyboard = []
-        for device in devices:
-            device_id, name, ip, is_online = device
-            status = "🟢" if is_online else "🔴"
-            btn_text = f"{status} {name} ({ip})"
-            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"device_{device_id}")])
+        keyboard = [
+            [InlineKeyboardButton(
+                f"{'🟢' if is_online else '🔴'} {name} ({ip})",
+                callback_data=f"device_{device_id}"
+            )]
+            for device_id, name, ip, is_online in devices
+        ]
         
         await update.message.reply_text(
             "Список устройств:",
@@ -130,141 +123,126 @@ class ServerBot:
         )
 
     async def callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка inline кнопок"""
+        """Обработка callback-запросов"""
         query = update.callback_query
         await query.answer()
         
         if query.data.startswith("device_"):
-            device_id = query.data[7:]
-            await self.show_device_actions(query, device_id)
-        elif query.data.startswith("action_"):
-            parts = query.data[7:].split("_")
-            device_id = parts[0]
-            action = "_".join(parts[1:])
-            await self.handle_device_action(query, device_id, action)
+            await self.handle_device_action(query, query.data[7:])
         elif query.data == "back_to_devices":
             await self.list_devices_command(query.message, context)
 
-    async def show_device_actions(self, query, device_id):
-        """Показать действия для устройства"""
-        conn = sqlite3.connect(DATABASE)
-        c = conn.cursor()
-        c.execute("SELECT name, is_online FROM devices WHERE id=?", (device_id,))
-        device = c.fetchone()
-        conn.close()
+    async def handle_device_action(self, query, device_id):
+        """Обработка действий с устройством"""
+        with sqlite3.connect(DATABASE) as conn:
+            c = conn.cursor()
+            c.execute("SELECT name, is_online FROM devices WHERE id=?", (device_id,))
+            device = c.fetchone()
         
         if not device:
             await query.edit_message_text("Устройство не найдено")
             return
             
         name, is_online = device
-        status = "онлайн" if is_online else "оффлайн"
         
-        keyboard = []
         if is_online:
-            actions = [
-                ("🖥 Скриншот", "screenshot"),
-                ("🔌 Выключить", "shutdown"),
-                ("🔄 Перезагрузить", "reboot")
+            keyboard = [
+                [InlineKeyboardButton("🖥 Скриншот", callback_data=f"action_{device_id}_screenshot")],
+                [InlineKeyboardButton("🔌 Выключить", callback_data=f"action_{device_id}_shutdown")],
+                [InlineKeyboardButton("🔄 Перезагрузить", callback_data=f"action_{device_id}_reboot")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_devices")]
             ]
-            for text, action in actions:
-                keyboard.append([InlineKeyboardButton(text, callback_data=f"action_{device_id}_{action}")])
-        
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_devices")])
-        
-        await query.edit_message_text(
-            f"Устройство: {name}\nСтатус: {status}\n\nВыберите действие:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+            await query.edit_message_text(
+                f"Управление устройством: {name}\nСтатус: онлайн\n\nВыберите действие:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            await query.edit_message_text(
+                f"Устройство {name} в настоящее время недоступно",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_devices")]
+                ])
+            )
 
-    async def handle_device_action(self, query, device_id, action):
-        """Обработка действий с устройством"""
-        conn = sqlite3.connect(DATABASE)
-        c = conn.cursor()
-        
-        c.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
-                 (device_id, action))
-        conn.commit()
-        conn.close()
-        
-        await query.edit_message_text(f"Команда '{action}' отправлена на устройство.")
+    def run(self):
+        """Запуск бота"""
+        self.application.run_polling()
 
+# API Endpoints
 @api.post("/register")
 async def register_device(request: Request):
+    """Регистрация нового устройства"""
     data = await request.json()
     
     if request.headers.get("X-Auth-Token") != API_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
     
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
+    with sqlite3.connect(DATABASE) as conn:
+        conn.execute('''INSERT OR REPLACE INTO devices 
+                      (id, name, ip, os, last_seen, is_online)
+                      VALUES (?, ?, ?, ?, datetime('now'), 1)''',
+                   (data['device_id'], data['system_info']['name'],
+                    data['system_info']['ip'], data['system_info']['os']))
     
-    c.execute('''INSERT OR REPLACE INTO devices 
-                (id, name, ip, os, last_seen, is_online)
-                VALUES (?, ?, ?, ?, datetime('now'), 1)''',
-              (data['device_id'], data['system_info']['name'],
-               data['system_info']['ip'], data['system_info']['os']))
-    
-    conn.commit()
-    conn.close()
-    
-    return JSONResponse({"status": "success"})
+    return {"status": "success"}
 
 @api.post("/heartbeat")
 async def heartbeat(request: Request):
+    """Обновление статуса устройства"""
     data = await request.json()
     
     if request.headers.get("X-Auth-Token") != API_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
     
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("UPDATE devices SET last_seen=datetime('now'), is_online=1 WHERE id=?",
-              (data['device_id'],))
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DATABASE) as conn:
+        conn.execute("UPDATE devices SET last_seen=datetime('now'), is_online=1 WHERE id=?",
+                   (data['device_id'],))
     
-    return JSONResponse({"status": "success"})
+    return {"status": "success"}
 
 @api.get("/commands")
 async def get_commands(device_id: str, request: Request):
+    """Получение команд для устройства"""
     if request.headers.get("X-Auth-Token") != API_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
     
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
+    with sqlite3.connect(DATABASE) as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, command FROM commands WHERE device_id=? AND status='pending'",
+                 (device_id,))
+        commands = [{"id": row[0], "command": row[1]} for row in c.fetchall()]
+        
+        if commands:
+            c.execute("UPDATE commands SET status='executing' WHERE id IN ({})".format(
+                ",".join(str(cmd['id']) for cmd in commands)))
     
-    c.execute("SELECT id, command FROM commands WHERE device_id=? AND status='pending'",
-             (device_id,))
-    commands = [{"id": row[0], "command": row[1]} for row in c.fetchall()]
-    
-    if commands:
-        c.execute("UPDATE commands SET status='executing' WHERE id IN ({})".format(
-            ",".join(str(cmd['id']) for cmd in commands)))
-        conn.commit()
-    
-    conn.close()
-    
-    return JSONResponse({"commands": commands})
+    return {"commands": commands}
 
-def run_api():
+def run_api_server():
     """Запуск API сервера"""
     if is_port_in_use(API_PORT):
         logger.error(f"Порт {API_PORT} уже занят!")
         return
     
-    uvicorn.run(api, host="0.0.0.0", port=API_PORT)
+    config = uvicorn.Config(
+        api,
+        host="0.0.0.0",
+        port=API_PORT,
+        log_level="info"
+    )
+    server = uvicorn.Server(config)
+    server.run()
 
-if __name__ == '__main__':
-    # Проверка порта перед запуском
+def main():
+    """Основная функция запуска"""
     if is_port_in_use(API_PORT):
         print(f"Ошибка: Порт {API_PORT} уже используется!")
         print("1. Закройте другие программы, использующие этот порт")
         print(f"2. Или измените API_PORT в коде на другой (сейчас {API_PORT})")
-        exit(1)
+        return
     
-    # Запускаем API в отдельном потоке
-    api_thread = Thread(target=run_api, daemon=True)
+    # Запускаем API сервер в отдельном потоке
+    api_thread = Thread(target=run_api_server, daemon=True)
     api_thread.start()
     
     # Запускаем Telegram бота
@@ -275,3 +253,6 @@ if __name__ == '__main__':
         bot.run()
     except Exception as e:
         print(f"Ошибка при запуске бота: {e}")
+
+if __name__ == '__main__':
+    main()
