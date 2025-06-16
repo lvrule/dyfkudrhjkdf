@@ -1,4 +1,4 @@
-# client.py - усовершенствованная версия
+# client.py - исправленная версия
 import requests
 import socket
 import time
@@ -6,26 +6,19 @@ import platform
 import hashlib
 from threading import Thread
 import uuid
+import sys
 
 # Конфигурация
-SERVER_URL = "http://95.163.84.18:8080"
-UNIQUE_SUFFIX = "PCCTRL"  # Ваша уникальная приписка
+SERVER_URL = "http://localhost:8080"  # Тестируем на локальной машине
+API_SECRET = "ваш_секретный_ключ"    # Должен совпадать с серверным
+UNIQUE_SUFFIX = "PCCTRL"
 
 def generate_device_id():
-    """Генерирует уникальный ID устройства на основе имени ПК и хеша"""
-    # Получаем имя компьютера
+    """Генерирует уникальный ID устройства"""
     pc_name = platform.node()
-    
-    # Генерируем дополнительный уникальный идентификатор
     unique_hash = hashlib.md5(str(uuid.getnode()).encode()).hexdigest()[:6].upper()
-    
-    # Собираем итоговый ID (имя_ПК + приписка + хеш)
     device_id = f"{pc_name}-{UNIQUE_SUFFIX}-{unique_hash}"
-    
-    # Убираем возможные пробелы и спецсимволы
-    device_id = ''.join(e for e in device_id if e.isalnum() or e == '-')
-    
-    return device_id
+    return ''.join(e for e in device_id if e.isalnum() or e == '-')
 
 def get_system_info():
     """Собирает информацию о системе"""
@@ -52,18 +45,27 @@ class PCClient:
                     "system_info": self.system_info,
                     "status": "online"
                 }
+                
                 response = requests.post(
                     f"{SERVER_URL}/register",
                     json=data,
+                    headers={"X-Auth-Token": API_SECRET},
                     timeout=10
                 )
                 
                 if response.status_code == 200:
                     print(f"Устройство {self.device_id} успешно зарегистрировано")
                     return True
+                else:
+                    print(f"Ошибка регистрации: {response.status_code} - {response.text}")
+                    time.sleep(30)
                     
-            except Exception as e:
-                print(f"Ошибка регистрации: {e}. Повтор через 30 сек...")
+            except requests.exceptions.RequestException as e:
+                print(f"Ошибка подключения: {e}")
+                print("Проверьте:")
+                print(f"1. Сервер запущен по адресу {SERVER_URL}")
+                print("2. Порт 8080 открыт в фаерволе")
+                print("3. Сеть доступна")
                 time.sleep(30)
                 
         return False
@@ -72,15 +74,20 @@ class PCClient:
         """Регулярная отправка сигналов активности"""
         while self.running:
             try:
-                requests.post(
+                response = requests.post(
                     f"{SERVER_URL}/heartbeat",
                     json={"device_id": self.device_id},
+                    headers={"X-Auth-Token": API_SECRET},
                     timeout=5
                 )
-                time.sleep(60)  # Отправляем каждую минуту
+                
+                if response.status_code != 200:
+                    print(f"Ошибка heartbeat: {response.text}")
+                    
+                time.sleep(60)
                 
             except Exception as e:
-                print(f"Ошибка heartbeat: {e}")
+                print(f"Ошибка отправки heartbeat: {e}")
                 time.sleep(10)
     
     def check_commands(self):
@@ -89,15 +96,18 @@ class PCClient:
             try:
                 response = requests.get(
                     f"{SERVER_URL}/commands?device_id={self.device_id}",
+                    headers={"X-Auth-Token": API_SECRET},
                     timeout=10
                 )
                 
                 if response.status_code == 200:
-                    commands = response.json()
+                    commands = response.json().get("commands", [])
                     for cmd in commands:
                         self.execute_command(cmd)
+                elif response.status_code != 200:
+                    print(f"Ошибка получения команд: {response.text}")
                 
-                time.sleep(5)  # Проверяем команды каждые 5 секунд
+                time.sleep(5)
                 
             except Exception as e:
                 print(f"Ошибка проверки команд: {e}")
@@ -105,11 +115,22 @@ class PCClient:
     
     def execute_command(self, command):
         """Выполнение полученной команды"""
-        print(f"Выполнение команды: {command}")
-        # Здесь реализуйте выполнение команд
+        try:
+            print(f"Получена команда: {command['command']}")
+            # Здесь реализуйте выполнение команд
+            # Например:
+            if command['command'] == 'screenshot':
+                self.take_screenshot()
+            elif command['command'] == 'shutdown':
+                self.shutdown_pc()
+                
+        except Exception as e:
+            print(f"Ошибка выполнения команды: {e}")
     
     def run(self):
         """Запуск клиента"""
+        print(f"Запуск клиента с ID: {self.device_id}")
+        
         if self.register_device():
             Thread(target=self.send_heartbeat, daemon=True).start()
             Thread(target=self.check_commands, daemon=True).start()
@@ -122,5 +143,9 @@ class PCClient:
                 print("Клиент остановлен")
 
 if __name__ == '__main__':
-    client = PCClient()
-    client.run()
+    try:
+        client = PCClient()
+        client.run()
+    except Exception as e:
+        print(f"Фатальная ошибка: {e}")
+        sys.exit(1)

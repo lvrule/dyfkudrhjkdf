@@ -1,4 +1,4 @@
-# server.py - полностью рабочая версия
+# server.py - исправленная версия
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -50,7 +50,7 @@ class ServerBot:
         with sqlite3.connect(DATABASE) as conn:
             c = conn.cursor()
             c.execute('''CREATE TABLE IF NOT EXISTS devices
-                        (id TEXT PRIMARY KEY,
+                        (device_id TEXT PRIMARY KEY,
                          name TEXT,
                          ip TEXT,
                          os TEXT,
@@ -102,7 +102,7 @@ class ServerBot:
             
         with sqlite3.connect(DATABASE) as conn:
             c = conn.cursor()
-            c.execute("SELECT id, name, ip, is_online FROM devices")
+            c.execute("SELECT device_id, name, ip, is_online FROM devices")
             devices = c.fetchall()
         
         if not devices:
@@ -121,7 +121,7 @@ class ServerBot:
             "Список устройств:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-
+            
     async def callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка callback-запросов"""
         query = update.callback_query
@@ -136,7 +136,7 @@ class ServerBot:
         """Обработка действий с устройством"""
         with sqlite3.connect(DATABASE) as conn:
             c = conn.cursor()
-            c.execute("SELECT name, is_online FROM devices WHERE id=?", (device_id,))
+            c.execute("SELECT name, is_online FROM devices WHERE device_id=?", (device_id,))
             device = c.fetchone()
         
         if not device:
@@ -160,9 +160,8 @@ class ServerBot:
             await query.edit_message_text(
                 f"Устройство {name} в настоящее время недоступно",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_devices")]
-                ])
-            )
+                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_devices")]]
+                ))
 
     def run(self):
         """Запуск бота"""
@@ -179,7 +178,7 @@ async def register_device(request: Request):
     
     with sqlite3.connect(DATABASE) as conn:
         conn.execute('''INSERT OR REPLACE INTO devices 
-                      (id, name, ip, os, last_seen, is_online)
+                      (device_id, name, ip, os, last_seen, is_online)
                       VALUES (?, ?, ?, ?, datetime('now'), 1)''',
                    (data['device_id'], data['system_info']['name'],
                     data['system_info']['ip'], data['system_info']['os']))
@@ -195,7 +194,7 @@ async def heartbeat(request: Request):
         raise HTTPException(status_code=403, detail="Forbidden")
     
     with sqlite3.connect(DATABASE) as conn:
-        conn.execute("UPDATE devices SET last_seen=datetime('now'), is_online=1 WHERE id=?",
+        conn.execute("UPDATE devices SET last_seen=datetime('now'), is_online=1 WHERE device_id=?",
                    (data['device_id'],))
     
     return {"status": "success"}
