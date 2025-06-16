@@ -1,4 +1,4 @@
-# server.py - полная серверная реализация
+# server.py - исправленная версия
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -14,9 +14,8 @@ import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from threading import Thread
-import time
-import hashlib
 import secrets
+import socket
 
 # Настройка логирования
 logging.basicConfig(
@@ -27,9 +26,14 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 DATABASE = 'pc_control.db'
-API_PORT = 8080
-API_SECRET = secrets.token_hex(16)  # Секретный ключ для API
-ADMIN_IDS = [5276367440]  # Ваш Telegram ID
+API_PORT = 8080  # Измененный порт
+API_SECRET = secrets.token_hex(16)
+ADMIN_IDS = [123456789]  # Замените на ваш Telegram ID
+
+# Проверка доступности порта
+def is_port_in_use(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('localhost', port)) == 0
 
 # Инициализация FastAPI
 api = FastAPI()
@@ -46,7 +50,6 @@ class ServerBot:
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
         
-        # Таблица устройств
         c.execute('''CREATE TABLE IF NOT EXISTS devices
                     (id TEXT PRIMARY KEY,
                      name TEXT,
@@ -55,19 +58,16 @@ class ServerBot:
                      last_seen TIMESTAMP,
                      is_online INTEGER DEFAULT 0)''')
         
-        # Таблица пользователей
         c.execute('''CREATE TABLE IF NOT EXISTS users
                     (user_id INTEGER PRIMARY KEY,
                      username TEXT)''')
         
-        # Таблица команд
         c.execute('''CREATE TABLE IF NOT EXISTS commands
                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
                      device_id TEXT,
                      command TEXT,
                      status TEXT DEFAULT 'pending',
-                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                     FOREIGN KEY(device_id) REFERENCES devices(id))''')
+                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         
         conn.commit()
         conn.close()
@@ -77,9 +77,7 @@ class ServerBot:
         self.app.add_handlers([
             CommandHandler("start", self.start_command),
             CommandHandler("devices", self.list_devices_command),
-            CommandHandler("help", self.help_command),
-            CallbackQueryHandler(self.callback_handler),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self.message_handler)
+            CallbackQueryHandler(self.callback_handler)
         ])
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -99,8 +97,7 @@ class ServerBot:
         await update.message.reply_text(
             "🖥️ Панель управления ПК\n\n"
             "Доступные команды:\n"
-            "/devices - список устройств\n"
-            "/help - справка"
+            "/devices - список устройств"
         )
 
     async def list_devices_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -145,6 +142,8 @@ class ServerBot:
             device_id = parts[0]
             action = "_".join(parts[1:])
             await self.handle_device_action(query, device_id, action)
+        elif query.data == "back_to_devices":
+            await self.list_devices_command(query.message, context)
 
     async def show_device_actions(self, query, device_id):
         """Показать действия для устройства"""
@@ -165,10 +164,8 @@ class ServerBot:
         if is_online:
             actions = [
                 ("🖥 Скриншот", "screenshot"),
-                ("📷 Веб-камера", "webcam"),
                 ("🔌 Выключить", "shutdown"),
-                ("🔄 Перезагрузить", "reboot"),
-                ("⌨️ Команда", "custom_cmd")
+                ("🔄 Перезагрузить", "reboot")
             ]
             for text, action in actions:
                 keyboard.append([InlineKeyboardButton(text, callback_data=f"action_{device_id}_{action}")])
@@ -185,37 +182,23 @@ class ServerBot:
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
         
-        # Добавляем команду в очередь
         c.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
                  (device_id, action))
-        command_id = c.lastrowid
         conn.commit()
         conn.close()
         
-        await query.edit_message_text(f"Команда '{action}' отправлена на устройство. Ожидайте выполнения...")
+        await query.edit_message_text(f"Команда '{action}' отправлена на устройство.")
 
-    async def message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка текстовых сообщений"""
-        pass
-
-    def run(self):
-        """Запуск бота"""
-        self.app.run_polling()
-
-# API endpoints
 @api.post("/register")
 async def register_device(request: Request):
-    """Регистрация нового устройства"""
     data = await request.json()
     
-    # Проверка секретного ключа
     if request.headers.get("X-Auth-Token") != API_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
     
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     
-    # Обновляем информацию об устройстве
     c.execute('''INSERT OR REPLACE INTO devices 
                 (id, name, ip, os, last_seen, is_online)
                 VALUES (?, ?, ?, ?, datetime('now'), 1)''',
@@ -229,7 +212,6 @@ async def register_device(request: Request):
 
 @api.post("/heartbeat")
 async def heartbeat(request: Request):
-    """Обновление статуса устройства"""
     data = await request.json()
     
     if request.headers.get("X-Auth-Token") != API_SECRET:
@@ -246,19 +228,16 @@ async def heartbeat(request: Request):
 
 @api.get("/commands")
 async def get_commands(device_id: str, request: Request):
-    """Получение команд для устройства"""
     if request.headers.get("X-Auth-Token") != API_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
     
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     
-    # Получаем pending команды
     c.execute("SELECT id, command FROM commands WHERE device_id=? AND status='pending'",
              (device_id,))
     commands = [{"id": row[0], "command": row[1]} for row in c.fetchall()]
     
-    # Помечаем команды как полученные
     if commands:
         c.execute("UPDATE commands SET status='executing' WHERE id IN ({})".format(
             ",".join(str(cmd['id']) for cmd in commands)))
@@ -268,38 +247,31 @@ async def get_commands(device_id: str, request: Request):
     
     return JSONResponse({"commands": commands})
 
-@api.post("/command_result")
-async def command_result(request: Request):
-    """Отправка результата выполнения команды"""
-    data = await request.json()
-    
-    if request.headers.get("X-Auth-Token") != API_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("UPDATE commands SET status=? WHERE id=?",
-              ("success" if data['success'] else "failed", data['command_id']))
-    conn.commit()
-    conn.close()
-    
-    # Здесь можно добавить отправку уведомления в Telegram
-    
-    return JSONResponse({"status": "success"})
-
 def run_api():
     """Запуск API сервера"""
+    if is_port_in_use(API_PORT):
+        logger.error(f"Порт {API_PORT} уже занят!")
+        return
+    
     uvicorn.run(api, host="0.0.0.0", port=API_PORT)
 
 if __name__ == '__main__':
+    # Проверка порта перед запуском
+    if is_port_in_use(API_PORT):
+        print(f"Ошибка: Порт {API_PORT} уже используется!")
+        print("1. Закройте другие программы, использующие этот порт")
+        print(f"2. Или измените API_PORT в коде на другой (сейчас {API_PORT})")
+        exit(1)
+    
     # Запускаем API в отдельном потоке
     api_thread = Thread(target=run_api, daemon=True)
     api_thread.start()
     
     # Запускаем Telegram бота
-    bot = ServerBot("8060699147:AAEawF_dYzDuEA7lqF_FHCuHsujuMwF4r8k")
-    
-    print(f"Сервер запущен. API секрет: {API_SECRET}")
-    print(f"API доступен по адресу: http://95.163.84.18:{API_PORT}")
-    
-    bot.run()
+    try:
+        bot = ServerBot("8060699147:AAEawF_dYzDuEA7lqF_FHCuHsujuMwF4r8k")
+        print(f"Сервер запущен. API секрет: {API_SECRET}")
+        print(f"API доступен по адресу: http://localhost:{API_PORT}")
+        bot.run()
+    except Exception as e:
+        print(f"Ошибка при запуске бота: {e}")
