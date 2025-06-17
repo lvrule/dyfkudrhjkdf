@@ -110,6 +110,8 @@ class ServerBot:
 
     async def show_devices_list(self, chat_id):
         with sqlite3.connect(DATABASE) as conn:
+            # Обновить статусы: если last_seen > 2 мин назад, is_online=0
+            conn.execute("UPDATE devices SET is_online=0 WHERE last_seen < datetime('now', '-120 seconds')")
             c = conn.cursor()
             c.execute("SELECT device_id, name, ip, last_seen FROM devices")
             devices = c.fetchall()
