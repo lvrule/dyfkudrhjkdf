@@ -151,7 +151,7 @@ class ServerBot:
             parts = query.data.split("_")
             device_id = parts[1]
             action = "_".join(parts[2:])
-            await self.handle_device_action_command(query.message.chat_id, device_id, action)
+            await self.handle_device_action_command(query.message.chat_id, device_id, action, context)
         elif query.data == "back_to_devices":
             await self.show_devices_list(query.message.chat_id)
 
@@ -235,9 +235,7 @@ class ServerBot:
                     [InlineKeyboardButton("🔙 Назад", callback_data="back_to_devices")]]
                 ))
 
-    async def handle_device_action_command(self, chat_id, device_id, action, context=None):
-        if context is None:
-            context = self.application.bot._conversations.get(chat_id, {})
+    async def handle_device_action_command(self, chat_id, device_id, action, context):
         if action == "media_menu":
             keyboard = [
                 [InlineKeyboardButton("🖼️ Скриншот", callback_data=f"action_{device_id}_screenshot")],
