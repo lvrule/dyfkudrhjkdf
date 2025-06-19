@@ -977,15 +977,19 @@ async def command_result(request: Request):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     elif data.get('file_type') == 'url':
+        # Extract the actual URL from the result (it should be the last line)
+        lines = data['result'].split('\n')
+        download_url = lines[-1].replace('Ссылка: ', '').strip()
+        
         keyboard = [
-            [InlineKeyboardButton("⬇️ Скачать файл", url=data['result'])]
+            [InlineKeyboardButton("⬇️ Скачать файл", url=download_url)]
         ]
         
         await bot_instance.application.bot.send_message(
             chat_id=ADMIN_IDS[0],
             text=f"✅ Файл готов к скачиванию\n\n"
-                 f"📁 Имя файла: {os.path.basename(data['result'])}\n"
-                 f"🔗 Ссылка действительна 24 часа",
+                f"📁 Имя файла: {os.path.basename(download_url)}\n"
+                f"🔗 Ссылка действительна 24 часа",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     elif file_type == 'file':
