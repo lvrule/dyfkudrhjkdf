@@ -18,11 +18,12 @@ import requests
 import base64
 import os
 from datetime import datetime
-import asyncio
+from collections import defaultdict
 import tempfile
 import cv2
 import numpy as np
 import shutil
+from fastapi.staticfiles import StaticFiles
 
 bot_instance = None
 
@@ -37,6 +38,11 @@ API_PORT = 4443
 ADMIN_IDS = [5276367440]
 
 api = FastAPI()
+
+UPLOAD_FOLDER = 'uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+api.mount("/downloads", StaticFiles(directory=UPLOAD_FOLDER), name="downloads")
+upload_progress = defaultdict(dict)
 
 def is_port_in_use(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -764,6 +770,74 @@ class ServerBot:
 
     def run(self):
         self.application.run_polling()
+
+@api.post("/upload_file")
+async def upload_file(request: Request):
+    data = await request.json()
+    file_data = data['file_data']
+    file_name = data.get('file_name', 'file.bin')
+    
+    # Генерируем уникальное имя файла
+    import uuid
+    unique_id = str(uuid.uuid4())
+    save_name = f"{unique_id}_{file_name}"
+    save_path = os.path.join(UPLOAD_FOLDER, save_name)
+    
+    with open(save_path, 'wb') as f:
+        f.write(base64.b64decode(file_data))
+    
+    return {
+        "status": "success",
+        "download_url": f"http://{request.client.host}:{API_PORT}/downloads/{save_name}"
+    }
+
+@api.post("/upload_chunk")
+async def upload_chunk(request: Request):
+    data = await request.json()
+    file_name = data['file_name']
+    chunk_num = data['chunk_num']
+    
+    # Сохраняем чанк во временную папку
+    temp_dir = os.path.join(UPLOAD_FOLDER, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    chunk_path = os.path.join(temp_dir, f"{file_name}.part{chunk_num}")
+    with open(chunk_path, 'wb') as f:
+        f.write(base64.b64decode(data['file_data']))
+    
+    # Сохраняем информацию о чанке
+    upload_progress[file_name][chunk_num] = chunk_path
+    
+    return {"status": "success"}
+
+@api.post("/finalize_upload")
+async def finalize_upload(request: Request):
+    data = await request.json()
+    file_name = data['file_name']
+    total_chunks = data['total_chunks']
+    
+    # Проверяем, все ли чанки получены
+    if len(upload_progress.get(file_name, {})) != total_chunks:
+        return {"status": "error", "message": "Not all chunks received"}
+    
+    # Собираем файл из чанков
+    unique_id = str(uuid.uuid4())
+    final_name = f"{unique_id}_{file_name}"
+    final_path = os.path.join(UPLOAD_FOLDER, final_name)
+    
+    with open(final_path, 'wb') as outfile:
+        for i in range(total_chunks):
+            chunk_path = upload_progress[file_name][i]
+            with open(chunk_path, 'rb') as infile:
+                outfile.write(infile.read())
+            os.remove(chunk_path)
+    
+    del upload_progress[file_name]
+    
+    return {
+        "status": "success",
+        "download_url": f"http://{request.client.host}:{API_PORT}/downloads/{final_name}"
+    }
 
 @api.post("/register")
 async def register_device(request: Request):

