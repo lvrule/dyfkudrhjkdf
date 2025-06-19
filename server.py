@@ -1035,10 +1035,19 @@ async def command_result(request: Request):
                             caption=f"Результат с устройства {device_id}\n\n{result}"
                         )
                 else:
+                    # Просто текстовый результат
+                    if len(result) > 4000:  # Ограничение Telegram на длину сообщения
+                        result = result[:4000] + "\n... (сообщение обрезано)"
                     await bot_instance.application.bot.send_message(
                         chat_id=ADMIN_IDS[0],
-                        text=f"Результат выполнения команды:\n\n{result}"
+                        text=f"Результат с устройства {device_id}:\n{result}"
                     )
+                
+                # Обновляем статус команды в БД
+                with sqlite3.connect(DATABASE) as conn:
+                    conn.execute("UPDATE commands SET status='completed' WHERE id=?", (command_id,))
+                
+                return {"status": "success"}
             except Exception as e:
                 logger.error(f"Ошибка отправки результата: {e}")
     
