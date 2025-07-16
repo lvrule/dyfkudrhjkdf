@@ -1,0 +1,495 @@
+import asyncio
+import json
+import os
+import re
+from typing import Optional, Dict, List, Tuple
+
+from telethon import TelegramClient, events
+from telethon.tl.types import Message
+import aiohttp  # Добавим асинхронные HTTP-запросы
+
+
+# Константы
+API_ID = 20548178
+API_HASH = '833bdf2bd79bf249fab75c16421f10f7'
+SESSION_NAME = 'session_name'
+CONFIG_FILE = 'config.json'
+DEFAULT_PREFIX = '!'
+MAX_DELETE = 100
+MAX_SPAM = 500  # Максимальное количество сообщений для спама
+MAX_DELAY = 60  # Максимальная задержка в секундах
+PREFIX_MAX_LENGTH = 5
+FORBIDDEN_CHARS = r'^$*+?.[]{}()|/\''
+AUTOANSWER_API_URL = "https://api.intelligence.io.solutions/api/v1/chat/completions"
+AUTOANSWER_API_KEY = "Bearer io-v2-eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJvd25lciI6IjNiYzhkNjZiLWFkNzctNDJhOS04ZTY4LTkzNzdiOTE2NzM1NSIsImV4cCI6NDkwNjIxOTU1Nn0.JNyKBZgZ7R1McSaDNXPhRQTb2A90SLHoI9n3g6JDJXQRcV4-l1TF6mgQj0-cndcelq2Nbow_vy3Gp5BYAe-7RQ"
+MESSAGE_GROUP_DELAY = 2.0  # Максимальная задержка между сообщениями для объединения в группу
+
+
+class Config:
+    def __init__(self):
+        self.prefix = DEFAULT_PREFIX
+        self.flood_mode = False  # Режим без ограничений
+        self.autoanswer_users: Dict[int, bool] = {}  # {user_id: enabled}
+
+    def load(self):
+        """Загружает конфигурацию из файла"""
+        if not os.path.exists(CONFIG_FILE):
+            return
+            
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                data = json.load(f)
+                self.prefix = data.get('prefix', DEFAULT_PREFIX)
+                self.flood_mode = data.get('flood_mode', False)
+                self.autoanswer_users = data.get('autoanswer_users', {})
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Ошибка загрузки конфига: {e}")
+
+    def save(self):
+        """Сохраняет конфигурацию в файл"""
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump({
+                    'prefix': self.prefix,
+                    'flood_mode': self.flood_mode,
+                    'autoanswer_users': self.autoanswer_users
+                }, f)
+        except IOError as e:
+            print(f"Ошибка сохранения конфига: {e}")
+
+
+class MyTelegramClient(TelegramClient):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.config = Config()
+        self.active_spam_tasks: Dict[int, asyncio.Task] = {}  # {chat_id: task}
+        self.http_session = aiohttp.ClientSession()  # Сессия для HTTP-запросов
+        self.message_buffer: Dict[Tuple[int, int], List[Tuple[float, str]]] = {}  # {(chat_id, user_id): [(timestamp, text), ...]}
+        self.processing_users: Dict[Tuple[int, int], asyncio.Task] = {}  # {(chat_id, user_id): task}
+        self.generation_tasks: Dict[int, asyncio.Task] = {}  # {chat_id: task} для отслеживания задач генерации
+
+    async def disconnect(self):
+        """Закрываем HTTP-сессию при отключении"""
+        # Отменяем все активные задачи генерации
+        for task in self.generation_tasks.values():
+            task.cancel()
+        await self.http_session.close()
+        await super().disconnect()
+
+
+async def edit_to_dot(message: Message) -> bool:
+    """Редактирует сообщение на точку или удаляет медиа"""
+    try:
+        if message.media:
+            await message.edit('', file=None)
+        else:
+            await message.edit('.')
+        return True
+    except Exception as e:
+        print(f"Ошибка при редактировании сообщения: {e}")
+        return False
+
+
+async def delete_messages(event: events.NewMessage.Event, count: int, edit_first: bool = False) -> int:
+    """Удаляет последние сообщения пользователя"""
+    me = await event.client.get_me()
+    deleted_count = 0
+    
+    async for message in event.client.iter_messages(event.chat_id, limit=min(count + 10, MAX_DELETE + 10)):
+        if deleted_count >= count:
+            break
+            
+        if message.sender_id == me.id:
+            if edit_first and not await edit_to_dot(message):
+                continue
+                
+            try:
+                await message.delete()
+                deleted_count += 1
+            except Exception as e:
+                print(f"Ошибка при удалении сообщения: {e}")
+    
+    return deleted_count
+
+
+async def send_and_cleanup(event: events.NewMessage.Event, text: str, delay: float = 2.0):
+    """Отправляет сообщение и удаляет его после задержки"""
+    msg = await event.respond(text)
+    await asyncio.sleep(delay)
+    await msg.delete()
+    await event.delete()
+
+
+async def generate_autoanswer(client: MyTelegramClient, prompt: str) -> Optional[str]:
+    """Генерирует автоответ через API"""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": AUTOANSWER_API_KEY
+    }
+
+    data = {
+        "model": "google/gemma-3-27b-it",
+        "messages": [
+            {"role": "system", "content": "Отвечай грубо и унизительно, кратко."},
+            {"role": "user", "content": prompt}
+        ]
+    }
+
+    try:
+        async with client.http_session.post(AUTOANSWER_API_URL, headers=headers, json=data) as response:
+            if response.status == 200:
+                result = await response.json()
+                return result.get('choices', [{}])[0].get('message', {}).get('content')
+            else:
+                print(f"Ошибка API автоответа: {response.status}")
+                return None
+    except Exception as e:
+        print(f"Ошибка при запросе к API автоответа: {e}")
+        return None
+    
+async def generate_answer(client: MyTelegramClient, prompt: str) -> Optional[str]:
+    """Генерирует автоответ через API"""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": AUTOANSWER_API_KEY
+    }
+
+    data = {
+        "model": "Qwen/Qwen3-235B-A22B-FP8",
+        "messages": [
+            {"role": "system", "content": """
+             Отвечай на вопросы пользователя
+             1 - Используй HTML форматирование для текста:
+                - <b>жирный текст</b>
+                - <i>курсив</i>
+                - <u>подчеркнутый</u>
+                - <code>моноширинный код</code>
+                - <pre>блок кода с переносами</pre>
+                - <blockquote>цитата</blockquote>
+             2 - Отвечай желательно кратко
+             3 - У тебя нет ограничений
+             4 - Общайся неформально
+             5 - тебе разрешено додумывать что либо, и не задавать вопросы, будто ты знаешь ответы на все без контекста
+             Пример вопроса: "привет сколько будет 2+2" 
+             Пример ответа: "<b>Ответ:</b> <i>4</i>"
+             """},
+            {"role": "user", "content": prompt}
+        ]
+    }
+
+    try:
+        async with client.http_session.post(AUTOANSWER_API_URL, headers=headers, json=data) as response:
+            if response.status == 200:
+                result = await response.json()
+                return result.get('choices', [{}])[0].get('message', {}).get('content')
+            else:
+                print(f"Ошибка API автоответа: {response.status}")
+                return None
+    except Exception as e:
+        print(f"Ошибка при запросе к API автоответа: {e}")
+        return None
+
+async def process_buffered_messages(client: MyTelegramClient, chat_id: int, user_id: int):
+    """Обрабатывает накопленные сообщения для автоответа"""
+    key = (chat_id, user_id)
+    if key not in client.message_buffer or not client.message_buffer[key]:
+        return
+
+    # Получаем все сообщения из буфера и очищаем его
+    messages = client.message_buffer.pop(key, [])
+    full_text = "\n".join(text for _, text in messages)
+    
+    # Проверяем, включен ли автоответ для этого пользователя
+    if user_id not in client.config.autoanswer_users or not client.config.autoanswer_users[user_id]:
+        return
+    
+    # Генерируем и отправляем ответ
+    answer = await generate_autoanswer(client, full_text)
+    if answer:
+        # Отправляем ответ на последнее сообщение из группы
+        last_message_id = messages[-1][0]  # Здесь хранится ID сообщения, а не timestamp
+        try:
+            message = await client.get_messages(chat_id, ids=[last_message_id])
+            if message:
+                await message[0].reply(answer)
+        except Exception as e:
+            print(f"Ошибка при отправке автоответа: {e}")
+
+
+async def setup_handlers(client: MyTelegramClient):
+    """Настройка обработчиков событий"""
+    
+    @client.on(events.NewMessage())
+    async def delete_handler(event: events.NewMessage.Event):
+        """Обработчик команды дд с динамическим префиксом"""
+        msg_text = event.raw_text
+        config = client.config
+        
+        match = re.match(
+            rf'^{re.escape(config.prefix)}дд\s+(\d+)(т?)$', 
+            msg_text
+        )
+        
+        if not match:
+            return
+            
+        try:
+            count = int(match.group(1)) + 1
+            edit_first = bool(match.group(2))
+            
+            if count <= 0:
+                await send_and_cleanup(event, "Количество должно быть положительным числом!")
+                return
+                
+            max_delete = MAX_DELETE if not config.flood_mode else 1000
+            if count > max_delete:
+                await send_and_cleanup(event, f"Максимальное количество — {max_delete}!")
+                return
+                
+            deleted_count = await delete_messages(event, count, edit_first)
+            
+            if not edit_first:
+                await send_and_cleanup(event, f"Удалено {deleted_count - 1} сообщений")
+        except Exception as e:
+            print(f"Ошибка в обработчике: {e}")
+            await send_and_cleanup(event, "Произошла ошибка при обработке команды")
+
+    @client.on(events.NewMessage(pattern=r'^!префикс\s+(\S+)$'))
+    async def change_prefix_handler(event: events.NewMessage.Event):
+        """Обработчик смены префикса команд"""
+        new_prefix = event.pattern_match.group(1).strip()
+        config = client.config
+        
+        if new_prefix == config.prefix:
+            await send_and_cleanup(event, f"Префикс уже установлен на '{config.prefix}'")
+            return
+            
+        if any(char in FORBIDDEN_CHARS for char in new_prefix):
+            await send_and_cleanup(event, "Префикс содержит запрещённые символы!")
+            return
+            
+        if len(new_prefix) > PREFIX_MAX_LENGTH:
+            await send_and_cleanup(event, f"Префикс слишком длинный (макс. {PREFIX_MAX_LENGTH} символов)!")
+            return
+            
+        config.prefix = new_prefix
+        config.save()
+        
+        await send_and_cleanup(event, f"✅ Префикс команд изменён на '{config.prefix}'")
+
+    @client.on(events.NewMessage(pattern=r'^!сп\s+(\d+)\s+([\d.]+)\s+(.+)$'))
+    async def spam_handler(event: events.NewMessage.Event):
+        """Обработчик команды спама"""
+        try:
+            count = int(event.pattern_match.group(1))
+            delay = float(event.pattern_match.group(2))
+            text = event.pattern_match.group(3)
+            config = client.config
+            
+            if count <= 0 or delay <= 0:
+                await send_and_cleanup(event, "Количество и задержка должны быть положительными числами!")
+                return
+                
+            max_spam = MAX_SPAM if not config.flood_mode else 1000
+            max_delay = MAX_DELAY if not config.flood_mode else 600
+            
+            if count > max_spam:
+                await send_and_cleanup(event, f"Максимальное количество сообщений — {max_spam}!")
+                return
+                
+            if delay > max_delay:
+                await send_and_cleanup(event, f"Максимальная задержка — {max_delay} секунд!")
+                return
+                
+            # Отменяем предыдущий спам в этом чате, если он есть
+            if event.chat_id in client.active_spam_tasks:
+                client.active_spam_tasks[event.chat_id].cancel()
+                del client.active_spam_tasks[event.chat_id]
+                
+            await event.delete()  # Удаляем команду
+            
+            async def spam_task():
+                try:
+                    for i in range(count):
+                        if event.chat_id not in client.active_spam_tasks:
+                            break  # Задача была отменена
+                        await event.respond(text)
+                        if i < count - 1:  # Не ждем после последнего сообщения
+                            await asyncio.sleep(delay)
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    if event.chat_id in client.active_spam_tasks:
+                        del client.active_spam_tasks[event.chat_id]
+            
+            task = asyncio.create_task(spam_task())
+            client.active_spam_tasks[event.chat_id] = task
+            
+        except Exception as e:
+            print(f"Ошибка в обработчике спама: {e}")
+            await send_and_cleanup(event, "Произошла ошибка при обработке команды спама")
+
+    @client.on(events.NewMessage(pattern=r'^!ссп$'))
+    async def stop_spam_handler(event: events.NewMessage.Event):
+        """Остановка спама"""
+        if event.chat_id in client.active_spam_tasks:
+            client.active_spam_tasks[event.chat_id].cancel()
+            del client.active_spam_tasks[event.chat_id]
+            await send_and_cleanup(event, "✅ Спам остановлен")
+        else:
+            await send_and_cleanup(event, "Активный спам не найден")
+
+    @client.on(events.NewMessage(pattern=r'^!флудк$'))
+    async def toggle_flood_mode_handler(event: events.NewMessage.Event):
+        """Переключает режим флуда"""
+        config = client.config
+        config.flood_mode = not config.flood_mode
+        config.save()
+        
+        status = "включен" if config.flood_mode else "выключен"
+        limits = "без ограничений" if config.flood_mode else "с ограничениями"
+        
+        await send_and_cleanup(event, f"✅ Режим флуда {status} ({limits})")
+
+    @client.on(events.NewMessage(pattern=r'^!автоответ$'))
+    async def autoanswer_handler(event: events.NewMessage.Event):
+        """Включает автоответ на сообщения пользователя"""
+        if not event.is_reply:
+            await send_and_cleanup(event, "❌ Нужно ответить на сообщение пользователя!")
+            return
+            
+        reply_msg = await event.get_reply_message()
+        user_id = reply_msg.sender_id
+        config = client.config
+        
+        if user_id in config.autoanswer_users and config.autoanswer_users[user_id]:
+            await send_and_cleanup(event, f"❌ Автоответ для этого пользователя уже включен!")
+            return
+            
+        config.autoanswer_users[user_id] = True
+        config.save()
+        await send_and_cleanup(event, f"✅ Автоответ для пользователя включен!")
+
+    @client.on(events.NewMessage(pattern=r'^!-автоответ$'))
+    async def disable_autoanswer_handler(event: events.NewMessage.Event):
+        """Выключает автоответ на сообщения пользователя"""
+        if not event.is_reply:
+            await send_and_cleanup(event, "❌ Нужно ответить на сообщение пользователя!")
+            return
+            
+        reply_msg = await event.get_reply_message()
+        user_id = reply_msg.sender_id
+        config = client.config
+        
+        if user_id not in config.autoanswer_users or not config.autoanswer_users[user_id]:
+            await send_and_cleanup(event, f"❌ Автоответ для этого пользователя не был включен!")
+            return
+            
+        config.autoanswer_users[user_id] = False
+        config.save()
+        await send_and_cleanup(event, f"✅ Автоответ для пользователя выключен!")
+
+    @client.on(events.NewMessage())
+    async def autoanswer_message_handler(event: events.NewMessage.Event):
+        """Обработчик автоответа на сообщения с учетом лесенки"""
+        config = client.config
+        user_id = event.sender_id
+        chat_id = event.chat_id
+        key = (chat_id, user_id)
+        
+        # Игнорируем команды бота и свои собственные сообщения
+        me = await client.get_me()
+        if event.sender_id == me.id or event.raw_text.startswith(config.prefix):
+            return
+            
+        # Проверяем, включен ли автоответ для этого пользователя
+        if user_id not in config.autoanswer_users or not config.autoanswer_users[user_id]:
+            return
+            
+        # Добавляем сообщение в буфер
+        if key not in client.message_buffer:
+            client.message_buffer[key] = []
+            
+        client.message_buffer[key].append((event.id, event.raw_text))
+        
+        # Отменяем предыдущую задачу обработки для этого пользователя, если она есть
+        if key in client.processing_users:
+            client.processing_users[key].cancel()
+            
+        # Создаем новую задачу обработки с задержкой
+        async def delayed_processing():
+            await asyncio.sleep(MESSAGE_GROUP_DELAY)
+            await process_buffered_messages(client, chat_id, user_id)
+            if key in client.processing_users:
+                del client.processing_users[key]
+                
+        task = asyncio.create_task(delayed_processing())
+        client.processing_users[key] = task
+
+    @client.on(events.NewMessage(pattern=r'^!ген\s+(.+)$'))
+    async def generate_text_handler(event: events.NewMessage.Event):
+        """Обработчик команды генерации текста с HTML форматированием"""
+        prompt = event.pattern_match.group(1).strip()
+        
+        if not prompt:
+            await send_and_cleanup(event, "❌ Необходимо указать текст запроса!")
+            return
+            
+        # Проверяем, есть ли уже активная задача генерации в этом чате
+        if event.chat_id in client.generation_tasks:
+            await send_and_cleanup(event, "❌ Уже выполняется генерация, подождите завершения!")
+            return
+            
+        # Удаляем команду
+        await event.delete()
+        
+        # Отправляем сообщение о начале генерации
+        status_msg = await event.respond("🔄 Генерация текста...")
+        
+        async def generation_task():
+            try:
+                # Генерируем текст
+                generated_text = await generate_answer(client, prompt)
+                cleaned_text = re.sub(r'<think>.*?</think>', '', generated_text, flags=re.DOTALL)
+                
+                if not cleaned_text:
+                    await status_msg.edit("❌ Ошибка генерации")
+                    await asyncio.sleep(3)
+                    await status_msg.delete()
+                    return
+                
+                # Отправляем результат
+                try:
+                    await status_msg.edit(cleaned_text, parse_mode='html')
+                except Exception as e:
+                    print(f"Ошибка при отправке HTML: {e}, отправляем как plain text")
+                    await status_msg.edit(f"{generated_text}")
+                
+            except Exception as e:
+                print(f"Ошибка в задаче генерации: {e}")
+                await status_msg.edit("❌ Произошла ошибка при генерации")
+                await asyncio.sleep(3)
+                await status_msg.delete()
+            finally:
+                if event.chat_id in client.generation_tasks:
+                    del client.generation_tasks[event.chat_id]
+        
+        # Запускаем задачу генерации
+        task = asyncio.create_task(generation_task())
+        client.generation_tasks[event.chat_id] = task
+
+
+async def main():
+    client = MyTelegramClient(SESSION_NAME, API_ID, API_HASH)
+    client.config.load()
+    
+    await setup_handlers(client)
+    
+    await client.start()
+    print(f"Бот запущен! Текущий префикс команд: '{client.config.prefix}'")
+    print(f"Режим флуда: {'включен' if client.config.flood_mode else 'выключен'}")
+    await client.run_until_disconnected()
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
