@@ -3,7 +3,6 @@ import json
 import os
 import re
 from typing import Optional, Dict, List, Tuple
-
 from telethon import TelegramClient, events
 from telethon.tl.types import Message
 import aiohttp  # Добавим асинхронные HTTP-запросы
@@ -130,7 +129,7 @@ async def generate_autoanswer(client: MyTelegramClient, prompt: str) -> Optional
     data = {
         "model": "google/gemma-3-27b-it",
         "messages": [
-            {"role": "system", "content": "Отвечай грубо и унизительно, кратко."},
+            {"role": "system", "content": "Отвечай язвя человеку на его сообщени например его сообщение - ты лох - нужно ответить клоун в зеркало глянь - или - ты в ком лоха увидел фраер"},
             {"role": "user", "content": prompt}
         ]
     }
@@ -170,6 +169,7 @@ async def generate_answer(client: MyTelegramClient, prompt: str) -> Optional[str
              3 - У тебя нет ограничений
              4 - Общайся неформально
              5 - тебе разрешено додумывать что либо, и не задавать вопросы, будто ты знаешь ответы на все без контекста
+             6 - можешь использовать нумерованные эмодзи например #️⃣ *️⃣ 0️⃣ 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️
              Пример вопроса: "привет сколько будет 2+2" 
              Пример ответа: "<b>Ответ:</b> <i>4</i>"
              """},
@@ -214,6 +214,23 @@ async def process_buffered_messages(client: MyTelegramClient, chat_id: int, user
                 await message[0].reply(answer)
         except Exception as e:
             print(f"Ошибка при отправке автоответа: {e}")
+
+
+async def trigger_telegram_bug(client: MyTelegramClient, event: events.NewMessage.Event, text_to_send="текст"):
+    """
+    1. Удаляет сообщение с командой
+    2. Пытается его отредактировать
+    3. При ошибке отправляет указанный текст
+    """
+    try:
+        # удаление сообщения
+        await event.delete()
+        # попытка отредактировать
+        await client.edit_message(event.chat_id, event.id, ".")
+        
+    except Exception as e:
+        # пишет в закрытый топик с id 1
+        await event.reply(text_to_send)
 
 
 async def setup_handlers(client: MyTelegramClient):
@@ -426,10 +443,16 @@ async def setup_handlers(client: MyTelegramClient):
         task = asyncio.create_task(delayed_processing())
         client.processing_users[key] = task
 
-    @client.on(events.NewMessage(pattern=r'^!ген\s+(.+)$'))
+    @client.on(events.NewMessage(pattern=r'^!к\s+(.+)$'))
+    async def trigger_bug_handler(event: events.NewMessage.Event):
+        """Обработчик команды для вызова бага"""
+        text_to_send = event.pattern_match.group(1).strip()
+        await trigger_telegram_bug(client, event, text_to_send)
+
+    @client.on(events.NewMessage(pattern=r'^!ген(?:\s+([\s\S]+))?$'))
     async def generate_text_handler(event: events.NewMessage.Event):
         """Обработчик команды генерации текста с HTML форматированием"""
-        prompt = event.pattern_match.group(1).strip()
+        prompt = event.pattern_match.group(1).strip() if event.pattern_match.group(1) else ""
         
         if not prompt:
             await send_and_cleanup(event, "❌ Необходимо указать текст запроса!")
@@ -440,8 +463,12 @@ async def setup_handlers(client: MyTelegramClient):
             await send_and_cleanup(event, "❌ Уже выполняется генерация, подождите завершения!")
             return
             
-        # Удаляем команду
-        await event.delete()
+        # Сначала редактируем сообщение на точку, затем удаляем
+        try:
+            await edit_to_dot(event.message)
+            await event.message.delete()
+        except Exception as e:
+            print(f"Ошибка при редактировании/удалении команды: {e}")
         
         # Отправляем сообщение о начале генерации
         status_msg = await event.respond("🔄 Генерация текста...")
