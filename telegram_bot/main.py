@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import re
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Set
 from telethon import TelegramClient, events
 from telethon.tl.types import Message
 import aiohttp  # Добавим асинхронные HTTP-запросы
@@ -27,8 +27,10 @@ MESSAGE_GROUP_DELAY = 2.0  # Максимальная задержка межд�
 class Config:
     def __init__(self):
         self.prefix = DEFAULT_PREFIX
-        self.flood_mode = False  # Режим без ограничений
-        self.autoanswer_users: Dict[int, bool] = {}  # {user_id: enabled}
+        self.flood_mode = False
+        self.autoanswer_users: Dict[int, bool] = {}
+        self.gift_notify_chats: Set[int] = set()  # Чаты, где нужно уведомлять о новых подарках
+        self.known_gifts: Set[str] = set()  # Известные ID подарков
 
     def load(self):
         """Загружает конфигурацию из файла"""
@@ -41,6 +43,8 @@ class Config:
                 self.prefix = data.get('prefix', DEFAULT_PREFIX)
                 self.flood_mode = data.get('flood_mode', False)
                 self.autoanswer_users = data.get('autoanswer_users', {})
+                self.gift_notify_chats = set(data.get('gift_notify_chats', []))
+                self.known_gifts = set(data.get('known_gifts', []))
         except (json.JSONDecodeError, IOError) as e:
             print(f"Ошибка загрузки конфига: {e}")
 
@@ -51,7 +55,9 @@ class Config:
                 json.dump({
                     'prefix': self.prefix,
                     'flood_mode': self.flood_mode,
-                    'autoanswer_users': self.autoanswer_users
+                    'autoanswer_users': self.autoanswer_users,
+                    'gift_notify_chats': list(self.gift_notify_chats),
+                    'known_gifts': list(self.known_gifts)
                 }, f)
         except IOError as e:
             print(f"Ошибка сохранения конфига: {e}")
@@ -61,19 +67,69 @@ class MyTelegramClient(TelegramClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.config = Config()
-        self.active_spam_tasks: Dict[int, asyncio.Task] = {}  # {chat_id: task}
-        self.http_session = aiohttp.ClientSession()  # Сессия для HTTP-запросов
-        self.message_buffer: Dict[Tuple[int, int], List[Tuple[float, str]]] = {}  # {(chat_id, user_id): [(timestamp, text), ...]}
-        self.processing_users: Dict[Tuple[int, int], asyncio.Task] = {}  # {(chat_id, user_id): task}
-        self.generation_tasks: Dict[int, asyncio.Task] = {}  # {chat_id: task} для отслеживания задач генерации
+        self.active_spam_tasks: Dict[int, asyncio.Task] = {}
+        self.http_session = aiohttp.ClientSession()
+        self.message_buffer: Dict[Tuple[int, int], List[Tuple[float, str]]] = {}
+        self.processing_users: Dict[Tuple[int, int], asyncio.Task] = {}
+        self.generation_tasks: Dict[int, asyncio.Task] = {}
+        self.gift_check_task: Optional[asyncio.Task] = None  # Задача проверки подарков
 
     async def disconnect(self):
-        """Закрываем HTTP-сессию при отключении"""
-        # Отменяем все активные задачи генерации
+        """Закрываем HTTP-сессию и отменяем задачи при отключении"""
+        if self.gift_check_task:
+            self.gift_check_task.cancel()
         for task in self.generation_tasks.values():
             task.cancel()
         await self.http_session.close()
         await super().disconnect()
+
+    async def get_available_gifts(self) -> Optional[dict]:
+        """Получает список доступных подарков"""
+        url = "https://api.telegram.org/bot8387920808:AAHbBDxyOA2dJUYulaQUyPZRmY1sxtv0zes/getAvailableGifts"
+        try:
+            async with self.http_session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get('ok'):
+                        return data.get('result', {}).get('gifts', [])
+        except Exception as e:
+            print(f"Ошибка при получении подарков: {e}")
+        return None
+
+    async def check_new_gifts(self):
+        """Проверяет наличие новых подарков и отправляет уведомления"""
+        while True:
+            try:
+                gifts = await self.get_available_gifts()
+                if gifts:
+                    new_gifts = []
+                    for gift in gifts:
+                        gift_id = gift.get('id')
+                        if gift_id and gift_id not in self.config.known_gifts:
+                            new_gifts.append(gift)
+                            self.config.known_gifts.add(gift_id)
+                    
+                    if new_gifts and self.config.gift_notify_chats:
+                        message = "🎁 Появились новые подарки:\n\n"
+                        for gift in new_gifts:
+                            emoji = gift.get('sticker', {}).get('emoji', '🎁')
+                            stars = gift.get('star_count', 0)
+                            message += f"{emoji} (⭐ {stars})\n"
+                        
+                        for chat_id in self.config.gift_notify_chats:
+                            try:
+                                await self.send_message(chat_id, message)
+                            except Exception as e:
+                                print(f"Ошибка при отправке уведомления в чат {chat_id}: {e}")
+                    
+                    self.config.save()
+                
+                await asyncio.sleep(3600)  # Проверяем каждый час
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Ошибка в задаче проверки подарков: {e}")
+                await asyncio.sleep(600)  # Ждем 10 минут при ошибке
 
 
 async def edit_to_dot(message: Message) -> bool:
@@ -504,6 +560,46 @@ async def setup_handlers(client: MyTelegramClient):
         # Запускаем задачу генерации
         task = asyncio.create_task(generation_task())
         client.generation_tasks[event.chat_id] = task
+    @client.on(events.NewMessage(pattern=r'^!гифты$'))
+    async def gifts_handler(event: events.NewMessage.Event):
+        """Обработчик команды для получения списка подарков"""
+        try:
+            gifts = await client.get_available_gifts()
+            if not gifts:
+                await send_and_cleanup(event, "❌ Не удалось получить список подарков")
+                return
+            
+            message = "🎁 Доступные подарки:\n\n"
+            for gift in gifts:
+                emoji = gift.get('sticker', {}).get('emoji', '🎁')
+                stars = gift.get('star_count', 0)
+                message += f"{emoji} (⭐ {stars})\n"
+            
+            await event.respond(message)
+            await event.delete()
+        except Exception as e:
+            print(f"Ошибка в обработчике гифтов: {e}")
+            await send_and_cleanup(event, "❌ Произошла ошибка при получении подарков")
+
+    @client.on(events.NewMessage(pattern=r'^!угифт$'))
+    async def gift_notify_handler(event: events.NewMessage.Event):
+        """Включает/выключает уведомления о новых подарках в этом чате"""
+        config = client.config
+        chat_id = event.chat_id
+        
+        if chat_id in config.gift_notify_chats:
+            config.gift_notify_chats.remove(chat_id)
+            message = "🔕 Уведомления о новых подарках отключены"
+        else:
+            config.gift_notify_chats.add(chat_id)
+            message = "🔔 Уведомления о новых подарках включены"
+            
+            # Запускаем задачу проверки подарков, если она еще не запущена
+            if client.gift_check_task is None or client.gift_check_task.done():
+                client.gift_check_task = asyncio.create_task(client.check_new_gifts())
+        
+        config.save()
+        await send_and_cleanup(event, message)
 
 
 async def main():
