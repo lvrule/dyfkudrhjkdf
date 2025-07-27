@@ -84,7 +84,7 @@ def log_progress(user_id):
 # Расчет времени
 def calculate_time(user_id):
     data = get_user_data(user_id)
-    end_date = datetime(2024, 9, 30)  # Укажи свою дату
+    end_date = datetime(2025, 9, 30)  # Укажи свою дату
     today = datetime.now()
     days_left = (end_date - today).days
 
