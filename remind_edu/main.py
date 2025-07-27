@@ -50,7 +50,7 @@ def progress(message):
 
 💡 Совет: {'Ты впереди графика! 🎉' if daily_min < 30 else 'Пора взяться за учебу! 🔥'}
     """
-    bot.reply_to(message, progress_text)
+    bot.send_message(message.chat.id, progress_text, parse_mode="MarkDown")
 
 @bot.message_handler(commands=['remind'])
 def set_reminder(message):
