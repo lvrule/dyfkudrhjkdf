@@ -2,11 +2,14 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 from typing import Optional, Dict, List, Tuple, Set
 from telethon import TelegramClient, events
 from telethon.tl.types import Message
-import aiohttp  # Добавим асинхронные HTTP-запросы
-
+import aiohttp
+import ast
+import time
+import signal
 
 # Константы
 API_ID = 20548178
@@ -130,6 +133,146 @@ class MyTelegramClient(TelegramClient):
             except Exception as e:
                 print(f"Ошибка в задаче проверки подарков: {e}")
                 await asyncio.sleep(600)  # Ждем 10 минут при ошибке
+    
+    async def safe_eval(self, code: str, timeout: int = 5) -> str:
+        """Безопасное выполнение Python кода с ограничениями"""
+        try:
+            # Проверяем код на наличие запрещенных конструкций
+            forbidden_keywords = [
+                'import', 'exec', 'eval', 'open', 'os.', 'sys.', 'subprocess.',
+                '__import__', 'breakpoint', 'globals', 'locals', 'compile',
+                'memoryview', 'bytearray', 'super', 'staticmethod', 'classmethod',
+                'property', 'setattr', 'delattr', 'hasattr', 'getattr'
+            ]
+            
+            code_lower = code.lower()
+            for keyword in forbidden_keywords:
+                if keyword in code_lower:
+                    return f"❌ Запрещенная конструкция: {keyword}"
+            
+            # Проверяем синтаксис кода
+            try:
+                ast.parse(code)
+            except SyntaxError as e:
+                return f"❌ Синтаксическая ошибка: {str(e)}"
+            
+            # Создаем ограниченный globals
+            restricted_globals = {
+                '__builtins__': {
+                    'print': print,
+                    'range': range,
+                    'len': len,
+                    'str': str,
+                    'int': int,
+                    'float': float,
+                    'bool': bool,
+                    'list': list,
+                    'dict': dict,
+                    'tuple': tuple,
+                    'set': set,
+                    'sum': sum,
+                    'min': min,
+                    'max': max,
+                    'abs': abs,
+                    'round': round,
+                    'pow': pow,
+                },
+                'math': {
+                    'pi': 3.141592653589793,
+                    'e': 2.718281828459045,
+                    'sqrt': lambda x: x**0.5,
+                    'sin': lambda x: x,  # Заглушки
+                    'cos': lambda x: x,
+                    'tan': lambda x: x,
+                }
+            }
+            
+            # Создаем локальные переменные
+            local_vars = {}
+            
+            # Запускаем код с таймаутом
+            start_time = time.time()
+            
+            def handler(signum, frame):
+                raise TimeoutError("Execution timed out")
+            
+            signal.signal(signal.SIGALRM, handler)
+            signal.alarm(timeout)
+            
+            try:
+                exec(code, restricted_globals, local_vars)
+                signal.alarm(0)
+                
+                # Ищем переменные для вывода
+                if local_vars:
+                    result = "\n".join(f"{k} = {v}" for k, v in local_vars.items() if not k.startswith('_'))
+                    if result:
+                        return f"✅ Результат:\n{result}"
+                
+                return "✅ Код выполнен, но не возвращает результат"
+            except TimeoutError:
+                return "❌ Превышено время выполнения (таймаут)"
+            except Exception as e:
+                return f"❌ Ошибка выполнения: {str(e)}"
+            finally:
+                signal.alarm(0)
+                
+        except Exception as e:
+            return f"❌ Неизвестная ошибка: {str(e)}"
+
+    async def ping_target(self, target: str) -> str:
+        """Пингует указанный адрес или сайт"""
+        try:
+            # Удаляем протокол, если он есть
+            target = re.sub(r'^https?://', '', target)
+            
+            # Разделяем адрес и порт, если указан
+            if ':' in target:
+                host, port = target.split(':', 1)
+                try:
+                    port = int(port)
+                except ValueError:
+                    return f"❌ Неверный формат порта: {port}"
+                
+                # Проверяем соединение с портом
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(host, port),
+                        timeout=5
+                    )
+                    writer.close()
+                    await writer.wait_closed()
+                    return f"✅ {host}:{port} доступен"
+                except asyncio.TimeoutError:
+                    return f"❌ {host}:{port} недоступен (таймаут)"
+                except Exception as e:
+                    return f"❌ {host}:{port} недоступен: {str(e)}"
+            else:
+                # Обычный ping
+                process = await asyncio.create_subprocess_exec(
+                    'ping', '-c', '4', target,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode == 0:
+                    # Анализируем вывод ping
+                    output = stdout.decode()
+                    if '0 received' in output:
+                        return f"❌ {target} недоступен (0% успешных пакетов)"
+                    
+                    # Извлекаем статистику
+                    stats = re.search(r'(\d+)% packet loss', output)
+                    if stats:
+                        loss = stats.group(1)
+                        return f"✅ {target} доступен (потеря пакетов: {loss}%)"
+                    return f"✅ {target} доступен"
+                else:
+                    return f"❌ {target} недоступен (код ошибки: {process.returncode})"
+        except Exception as e:
+            return f"❌ Ошибка при выполнении ping: {str(e)}"
 
 
 async def edit_to_dot(message: Message) -> bool:
@@ -600,6 +743,55 @@ async def setup_handlers(client: MyTelegramClient):
         
         config.save()
         await send_and_cleanup(event, message)
+    @client.on(events.NewMessage(pattern=r'^!eval\s+([\s\S]+)$'))
+    async def eval_handler(event: events.NewMessage.Event):
+        """Обработчик выполнения Python кода"""
+        code = event.pattern_match.group(1).strip()
+        
+        if not code:
+            await send_and_cleanup(event, "❌ Необходимо указать код для выполнения!")
+            return
+            
+        # Отправляем сообщение о начале выполнения
+        status_msg = await event.respond("🔄 Выполнение кода...")
+        
+        try:
+            # Выполняем код
+            result = await client.safe_eval(code)
+            
+            # Отправляем результат
+            await status_msg.edit(result)
+        except Exception as e:
+            await status_msg.edit(f"❌ Произошла ошибка: {str(e)}")
+            await asyncio.sleep(3)
+            await status_msg.delete()
+        finally:
+            await event.delete()
+
+    @client.on(events.NewMessage(pattern=r'^!ping\s+([^\s]+)$'))
+    async def ping_handler(event: events.NewMessage.Event):
+        """Обработчик команды ping"""
+        target = event.pattern_match.group(1).strip()
+        
+        if not target:
+            await send_and_cleanup(event, "❌ Необходимо указать адрес для проверки!")
+            return
+            
+        # Отправляем сообщение о начале проверки
+        status_msg = await event.respond(f"🔄 Проверяем {target}...")
+        
+        try:
+            # Выполняем ping
+            result = await client.ping_target(target)
+            
+            # Отправляем результат
+            await status_msg.edit(result)
+        except Exception as e:
+            await status_msg.edit(f"❌ Произошла ошибка: {str(e)}")
+            await asyncio.sleep(3)
+            await status_msg.delete()
+        finally:
+            await event.delete()
 
 
 async def main():
